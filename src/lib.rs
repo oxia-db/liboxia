@@ -1,14 +1,9 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+mod client;
+pub mod client_builder;
+mod client_options;
+mod errors;
+mod shard_manager;
+#[allow(clippy::derive_partial_eq_without_eq)]
+pub mod oxia {
+    include!(concat!(env!("OUT_DIR"), "/io.streamnative.oxia.proto.rs"));
 }
