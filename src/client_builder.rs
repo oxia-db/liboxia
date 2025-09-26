@@ -29,7 +29,7 @@ impl OxiaClientBuilder {
         self
     }
 
-    pub fn build(self) -> Result<impl Client, OxiaError> {
+    pub async fn build(self) -> Result<impl Client, OxiaError> {
         let mut options = OxiaClientOptions::default();
         if let Some(service_address) = self.service_address {
             options.service_address = service_address
@@ -40,6 +40,6 @@ impl OxiaClientBuilder {
         if let Some(identity) = self.identity {
             options.identity = identity;
         }
-        ClientImpl::new(options)
+        ClientImpl::new(options).await
     }
 }

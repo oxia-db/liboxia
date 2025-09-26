@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+backoff = { version = "0.4.0", features = ["tokio"] }
 tonic = "0.13"
 prost = "0.13"
 prost-types = "0.14"
@@ -14,6 +15,8 @@ dashmap = "6.1.0"
 xxhash-rust = { version = "0.8.5", features = ["xxh32", "const_xxh32"] }
 uuid = { version = "1.7", features = ["v4"] }
 num_cpus = "1.16"
+tokio-util = "0.7"
+log = "0.4"
 
 [build-dependencies]
 tonic-build = "0.13.1"

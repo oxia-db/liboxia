@@ -1,17 +1,24 @@
+use crate::batch_manager::{BatchManager, Batcher};
 use crate::client_options::OxiaClientOptions;
 use crate::errors::OxiaError;
-use crate::oxia::oxia_client_client::OxiaClientClient;
-use crate::shard_manager::{ShardManagerImpl, ShardManagerOptions};
+use crate::errors::OxiaError::{KeyLeaderNotFound, UnexpectedStatus};
+use crate::operations::{Operation, PutOperation};
+use crate::oxia::Version;
+use crate::provider_manager::ProviderManager;
+use crate::shard_manager::{ShardManager, ShardManagerOptions};
+use crate::write_stream_manager::WriteStreamManager;
+use dashmap::DashMap;
 use std::sync::Arc;
-use tokio::runtime;
-use tokio::runtime::Runtime;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tonic::transport::Channel;
+use tokio::sync::{mpsc, oneshot};
+use tonic::async_trait;
 
 pub struct PutOptions {}
 
-pub struct PutResult {}
+pub struct PutResult {
+    key: String,
+    version: Version,
+}
 
 pub struct DeleteOptions {}
 
@@ -33,48 +40,100 @@ pub struct GetSequenceUpdatesOptions {}
 
 pub struct Notification {}
 
+#[async_trait]
 pub trait Client {
-    async fn put(key: String, value: Vec<u8>, options: PutOptions) -> Result<PutResult, OxiaError>;
-    async fn delete(key: String, options: DeleteOptions) -> Result<(), OxiaError>;
+     async fn put(
+        &self,
+        key: String,
+        value: Vec<u8>,
+        options: PutOptions,
+    ) -> Result<PutResult, OxiaError>;
+
+    async fn delete(&self, key: String, options: DeleteOptions) -> Result<(), OxiaError>;
     async fn delete_range(
+        &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
         options: DeleteRangeOptions,
     ) -> Result<(), OxiaError>;
-    async fn get(key: String, options: GetOptions) -> Result<GetResult, OxiaError>;
+    async fn get(&self, key: String, options: GetOptions) -> Result<GetResult, OxiaError>;
     async fn list(
+        &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
         options: ListOptions,
     ) -> Result<ListResult, OxiaError>;
     async fn range_scan(
+        &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
         options: RangeScanOptions,
     ) -> Result<RangeScanResult, OxiaError>;
-    async fn get_notifications() -> Result<mpsc::UnboundedReceiver<Notification>, OxiaError>;
+    async fn get_notifications(&self) -> Result<mpsc::UnboundedReceiver<Notification>, OxiaError>;
     async fn get_sequence_updates(
+        &self,
         key: String,
         options: GetSequenceUpdatesOptions,
     ) -> Result<mpsc::UnboundedReceiver<String>, OxiaError>;
 }
 
 pub(crate) struct ClientImpl {
-    pub(crate) provider: OxiaClientClient<Channel>,
-    pub(crate) runtime: Arc<Runtime>,
-    pub(crate) shard_manager: Arc<ShardManagerImpl>,
+    pub(crate) provider_manager: Arc<ProviderManager>,
+    pub(crate) shard_manager: Arc<ShardManager>,
+    pub(crate) write_stream_manager: Arc<WriteStreamManager>,
+    pub(crate) write_batch_manager: DashMap<i64, BatchManager>,
+    pub(crate) read_batch_manager: DashMap<i64, BatchManager>,
 }
 
+#[async_trait]
 impl Client for ClientImpl {
-    async fn put(key: String, value: Vec<u8>, options: PutOptions) -> Result<PutResult, OxiaError> {
-        todo!()
+    async fn put(
+        &self,
+        key: String,
+        value: Vec<u8>,
+        options: PutOptions,
+    ) -> Result<PutResult, OxiaError> {
+        match self.shard_manager.get_shard(&key) {
+            Some(shard_id) => {
+                let batch_manager = self.write_batch_manager.entry(shard_id).or_insert_with(|| {
+                    BatchManager::new(
+                        shard_id,
+                        Batcher::Write,
+                        self.shard_manager.clone(),
+                        self.provider_manager.clone(),
+                        self.write_stream_manager.clone(),
+                    )
+                });
+                let (tx, rx) = oneshot::channel();
+                batch_manager.add(Operation::Put(PutOperation {
+                    callback: Some(tx),
+                    key,
+                    value,
+                    expected_version_id: None,
+                    session_id: None,
+                    client_identity: None,
+                    partition_key: None,
+                    sequence_key_delta: vec![],
+                    secondary_indexes: vec![],
+                }))?;
+                let put_response = rx
+                    .await
+                    .map_err(|err| UnexpectedStatus(err.to_string()))??;
+                Ok(PutResult {
+                    key: put_response.key.unwrap(),
+                    version: put_response.version.unwrap(),
+                })
+            }
+            None => Err(KeyLeaderNotFound(key.clone())),
+        }
     }
 
-    async fn delete(key: String, options: DeleteOptions) -> Result<(), OxiaError> {
+    async fn delete(&self, key: String, options: DeleteOptions) -> Result<(), OxiaError> {
         todo!()
     }
 
     async fn delete_range(
+        &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
         options: DeleteRangeOptions,
@@ -82,11 +141,12 @@ impl Client for ClientImpl {
         todo!()
     }
 
-    async fn get(key: String, options: GetOptions) -> Result<GetResult, OxiaError> {
+    async fn get(&self, key: String, options: GetOptions) -> Result<GetResult, OxiaError> {
         todo!()
     }
 
     async fn list(
+        &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
         options: ListOptions,
@@ -95,6 +155,7 @@ impl Client for ClientImpl {
     }
 
     async fn range_scan(
+        &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
         options: RangeScanOptions,
@@ -102,11 +163,12 @@ impl Client for ClientImpl {
         todo!()
     }
 
-    async fn get_notifications() -> Result<UnboundedReceiver<Notification>, OxiaError> {
+    async fn get_notifications(&self) -> Result<UnboundedReceiver<Notification>, OxiaError> {
         todo!()
     }
 
     async fn get_sequence_updates(
+        &self,
         key: String,
         options: GetSequenceUpdatesOptions,
     ) -> Result<UnboundedReceiver<String>, OxiaError> {
@@ -115,26 +177,26 @@ impl Client for ClientImpl {
 }
 
 impl ClientImpl {
-    pub fn new(option: OxiaClientOptions) -> Result<impl Client, OxiaError> {
-        let runtime = runtime::Builder::new_multi_thread()
-            .worker_threads(4)
-            .enable_all()
-            .build()
-            .expect("failed to build tokio runtime");
-        let provider = runtime
-            .block_on(OxiaClientClient::connect(option.service_address))
-            .map_err(|e| OxiaError::Connection(format!("failed to connect: {e}")))?;
-        let shard_runtime = Arc::new(runtime);
-        let sm = ShardManagerImpl::new(ShardManagerOptions {
-            namespace: option.namespace,
-            runtime: shard_runtime.clone(),
-            provider: provider.clone(),
-        })?;
-
+    pub async fn new(option: OxiaClientOptions) -> Result<impl Client, OxiaError> {
+        let provider_manager = Arc::new(ProviderManager::new());
+        let shard_manager = Arc::new(
+            ShardManager::new(ShardManagerOptions {
+                address: option.service_address,
+                namespace: option.namespace,
+                provider_manager: provider_manager.clone(),
+            })
+            .await?,
+        );
+        let write_stream_manager = Arc::new(WriteStreamManager::new(
+            shard_manager.clone(),
+            provider_manager.clone(),
+        ));
         Ok(ClientImpl {
-            provider,
-            runtime: shard_runtime,
-            shard_manager: Arc::new(sm),
+            write_stream_manager,
+            provider_manager,
+            shard_manager,
+            write_batch_manager: DashMap::new(),
+            read_batch_manager: DashMap::new(),
         })
     }
 }
