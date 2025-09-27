@@ -1,16 +1,16 @@
 use crate::errors::OxiaError;
 use crate::errors::OxiaError::UnexpectedStatus;
-use crate::oxia::{WriteRequest, WriteResponse};
+use crate::oxia::{Status, WriteRequest, WriteResponse};
 use log::{info, warn};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use task::JoinHandle;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot::Receiver;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 use tonic::codegen::tokio_stream::StreamExt;
-use tonic::Streaming;
+use tonic::{Response, Streaming};
 
 pub(crate) struct Inflight {
     pub(crate) future: oneshot::Sender<WriteResponse>,
@@ -31,10 +31,30 @@ impl Inner {
 pub(crate) struct WriteStream {
     context: CancellationToken,
     inner: Arc<Mutex<Inner>>,
-    loop_handle: JoinHandle<()>,
+    defer_response: Mutex<Option<Receiver<WriteResponse>>>,
 }
 
 impl WriteStream {
+    pub(crate) async fn send_defer(&self, request: WriteRequest) -> Result<(), OxiaError> {
+        let mut inner_guard = self.inner.lock().await;
+        if !inner_guard.alive {
+            return Err(UnexpectedStatus("write stream is closed".to_string()));
+        }
+        let (tx, rx) = oneshot::channel();
+        let inflight = Inflight { future: tx };
+        inner_guard.inflight_deque.push_back(inflight);
+        let send_result = inner_guard.tx.send(request);
+        if send_result.is_err() {
+            inner_guard.alive = false;
+            inner_guard.fail_inflight();
+            return Err(UnexpectedStatus(send_result.unwrap_err().to_string()));
+        }
+        drop(inner_guard);
+        let mut guard = self.defer_response.lock().await;
+        *guard = Some(rx);
+        Ok(())
+    }
+
     pub(crate) async fn send(&self, request: WriteRequest) -> Result<WriteResponse, OxiaError> {
         let mut inner_guard = self.inner.lock().await;
         if !inner_guard.alive {
@@ -53,19 +73,40 @@ impl WriteStream {
         rx.await.map_err(|err| UnexpectedStatus(err.to_string()))
     }
 
-    pub(crate) fn wrap(tx: UnboundedSender<WriteRequest>, rx: Streaming<WriteResponse>) -> Self {
+    pub(crate) async fn get_defer_response(&self) -> Option<Result<WriteResponse, OxiaError>> {
+        let mut guard = self.defer_response.lock().await;
+        let option = guard.take();
+        if option.is_none() {
+            return None;
+        }
+        Some(
+            option
+                .unwrap()
+                .await
+                .map_err(|err| UnexpectedStatus(err.to_string())),
+        )
+    }
+
+    pub(crate) fn new(tx: UnboundedSender<WriteRequest>) -> Self {
         let inner = Arc::new(Mutex::new(Inner {
             alive: true,
             tx,
             inflight_deque: VecDeque::new(),
         }));
         let context = CancellationToken::new();
-        let handle = tokio::spawn(handle_response(context.clone(), inner.clone(), rx));
         WriteStream {
             context,
             inner,
-            loop_handle: handle,
+            defer_response: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn listen(&self, streaming: Streaming<WriteResponse>) {
+        tokio::spawn(handle_response(
+            self.context.clone(),
+            self.inner.clone(),
+            streaming,
+        ));
     }
 }
 
