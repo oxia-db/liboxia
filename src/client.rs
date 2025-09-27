@@ -42,7 +42,7 @@ pub struct Notification {}
 
 #[async_trait]
 pub trait Client {
-     async fn put(
+    async fn put(
         &self,
         key: String,
         value: Vec<u8>,
@@ -78,6 +78,7 @@ pub trait Client {
 }
 
 pub(crate) struct ClientImpl {
+    pub(crate) options: OxiaClientOptions,
     pub(crate) provider_manager: Arc<ProviderManager>,
     pub(crate) shard_manager: Arc<ShardManager>,
     pub(crate) write_stream_manager: Arc<WriteStreamManager>,
@@ -102,12 +103,14 @@ impl Client for ClientImpl {
                         self.shard_manager.clone(),
                         self.provider_manager.clone(),
                         self.write_stream_manager.clone(),
+                        self.options.batch_linger.clone(),
+                        self.options.batch_max_size.clone(),
                     )
                 });
                 let (tx, rx) = oneshot::channel();
                 batch_manager.add(Operation::Put(PutOperation {
                     callback: Some(tx),
-                    key,
+                    key: key.clone(),
                     value,
                     expected_version_id: None,
                     session_id: None,
@@ -120,7 +123,7 @@ impl Client for ClientImpl {
                     .await
                     .map_err(|err| UnexpectedStatus(err.to_string()))??;
                 Ok(PutResult {
-                    key: put_response.key.unwrap(),
+                    key: put_response.key.or(Some(key.clone())).unwrap(),
                     version: put_response.version.unwrap(),
                 })
             }
@@ -177,21 +180,23 @@ impl Client for ClientImpl {
 }
 
 impl ClientImpl {
-    pub async fn new(option: OxiaClientOptions) -> Result<impl Client, OxiaError> {
+    pub async fn new(options: OxiaClientOptions) -> Result<impl Client, OxiaError> {
         let provider_manager = Arc::new(ProviderManager::new());
         let shard_manager = Arc::new(
             ShardManager::new(ShardManagerOptions {
-                address: option.service_address,
-                namespace: option.namespace,
+                address: options.service_address.clone(),
+                namespace: options.namespace.clone(),
                 provider_manager: provider_manager.clone(),
             })
             .await?,
         );
         let write_stream_manager = Arc::new(WriteStreamManager::new(
+            options.namespace.clone(),
             shard_manager.clone(),
             provider_manager.clone(),
         ));
         Ok(ClientImpl {
+            options,
             write_stream_manager,
             provider_manager,
             shard_manager,

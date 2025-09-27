@@ -21,6 +21,12 @@ pub enum Batch {
 }
 
 impl Batch {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Batch::Read(read_batch) => read_batch.is_empty(),
+            Batch::Write(write_batch) => write_batch.is_empty(),
+        }
+    }
     pub fn can_add(&self, operation: &Operation) -> bool {
         match self {
             Batch::Read(read_batch) => read_batch.can_add(operation),
@@ -66,6 +72,10 @@ impl ReadBatch {
             shard_manager,
             provider_manager,
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.get_inflight.is_empty()
     }
 
     fn can_add(&self, operation: &Operation) -> bool {
@@ -153,6 +163,7 @@ impl ReadBatch {
 }
 
 pub(crate) struct WriteBatch {
+    shard_id: i64,
     put_inflight: Vec<PutOperation>,
     delete_inflight: Vec<DeleteOperation>,
     delete_range_inflight: Vec<DeleteRangeOperation>,
@@ -160,13 +171,20 @@ pub(crate) struct WriteBatch {
 }
 
 impl WriteBatch {
-    pub fn new(write_stream_manager: Arc<WriteStreamManager>) -> Self {
+    pub fn new(shard_id: i64, write_stream_manager: Arc<WriteStreamManager>) -> Self {
         WriteBatch {
+            shard_id,
             put_inflight: Vec::new(),
             delete_inflight: Vec::new(),
             delete_range_inflight: Vec::new(),
             write_stream_manager,
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.put_inflight.is_empty()
+            && self.delete_inflight.is_empty()
+            && self.delete_range_inflight.is_empty()
     }
 
     fn can_add(&self, operation: &Operation) -> bool {
@@ -190,7 +208,7 @@ impl WriteBatch {
 
     async fn flush(&mut self) {
         let mut write_request = WriteRequest {
-            shard: None,
+            shard: Some(self.shard_id),
             puts: vec![],
             deletes: vec![],
             delete_ranges: vec![],

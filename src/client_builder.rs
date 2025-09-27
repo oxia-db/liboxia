@@ -1,3 +1,4 @@
+use crate::address::ensure_protocol;
 use crate::client::{Client, ClientImpl};
 use crate::client_options::OxiaClientOptions;
 use crate::errors::OxiaError;
@@ -18,7 +19,7 @@ impl OxiaClientBuilder {
     }
 
     pub fn service_address(mut self, service_address: String) -> Self {
-        self.service_address = Some(service_address);
+        self.service_address = Some(ensure_protocol(service_address));
         self
     }
 

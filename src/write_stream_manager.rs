@@ -7,8 +7,13 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tonic::codegen::tokio_stream::wrappers::UnboundedReceiverStream;
+use tonic::Request;
+
+const WRITE_STREAM_HEADER_NAMESPACE: &str = "namespace";
+const WRITE_STREAM_HEADER_SHARD_ID: &str = "shard-id";
 
 pub struct WriteStreamManager {
+    namespace: String,
     shard_manager: Arc<ShardManager>,
     provider_manager: Arc<ProviderManager>,
 
@@ -29,18 +34,32 @@ impl WriteStreamManager {
             .await?;
         let (tx, rx) = mpsc::unbounded_channel();
         let mut client_guard = client.lock().await;
-        let stream = WriteStream::wrap(
-            tx,
-            client_guard
-                .write_stream(UnboundedReceiverStream::new(rx))
-                .await?
-                .into_inner(),
+        let mut write_stream_request = Request::new(UnboundedReceiverStream::new(rx));
+        let write_stream_request_metadata = write_stream_request.metadata_mut();
+        write_stream_request_metadata.insert(
+            WRITE_STREAM_HEADER_NAMESPACE,
+            self.namespace.parse().unwrap(),
         );
+        write_stream_request_metadata.insert(
+            WRITE_STREAM_HEADER_SHARD_ID,
+            shard_id.to_string().parse().unwrap(),
+        );
+        tx.send(request.clone()).unwrap();
+        let streaming = client_guard
+            .write_stream(write_stream_request)
+            .await?
+            .into_inner();
+        let stream = WriteStream::wrap(tx, streaming);
         stream.send(request).await
     }
 
-    pub fn new(shard_manager: Arc<ShardManager>, provider_manager: Arc<ProviderManager>) -> Self {
+    pub fn new(
+        namespace: String,
+        shard_manager: Arc<ShardManager>,
+        provider_manager: Arc<ProviderManager>,
+    ) -> Self {
         WriteStreamManager {
+            namespace,
             shard_manager,
             provider_manager,
             streams: Arc::new(DashMap::new()),

@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::codegen::tokio_stream::StreamExt;
 use tonic::{include_file_descriptor_set, Status};
+use crate::address::ensure_protocol;
 
 pub(crate) struct Node {
     pub service_address: String,
@@ -64,6 +65,7 @@ async fn start_assignments_listener(
                 })
                 .await?
                 .into_inner();
+            drop(guard_provider);
             loop {
                 tokio::select! {
                     _ = local_context.cancelled() => {
@@ -144,7 +146,7 @@ impl ShardManager {
     pub fn get_leader(&self, shard_id: i64) -> Option<Node> {
         let assignment_option = self.inner.current_assignments.get(&shard_id);
         assignment_option.map(|v| Node {
-            service_address: v.leader.clone(),
+            service_address: ensure_protocol(v.leader.clone()),
         })
     }
 
@@ -169,7 +171,7 @@ impl ShardManager {
                 ShardBoundaries::Int32HashRange(range) => {
                     if range.min_hash_inclusive <= code && code <= range.max_hash_inclusive {
                         return Some(Node {
-                            service_address: entry.leader.clone(),
+                            service_address: ensure_protocol(entry.leader.clone()),
                         });
                     }
                 }
