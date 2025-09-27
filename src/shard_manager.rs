@@ -7,10 +7,12 @@ use backoff::ExponentialBackoff;
 use dashmap::DashMap;
 use log::{info, warn};
 use std::sync::Arc;
+use tokio::sync::oneshot::Sender;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::codegen::tokio_stream::StreamExt;
-use tonic::Status;
+use tonic::{include_file_descriptor_set, Status};
 
 pub(crate) struct Node {
     pub service_address: String,
@@ -36,10 +38,11 @@ struct Inner {
 }
 
 async fn start_assignments_listener(
-    address: String,
     context: CancellationToken,
+    address: String,
     namespace: String,
     inner: Arc<Inner>,
+    init_tx: mpsc::Sender<()>,
 ) {
     let op_defer = || {
         let assignments_ref = inner.current_assignments.clone();
@@ -47,6 +50,7 @@ async fn start_assignments_listener(
         let local_inner = inner.clone();
         let local_context = context.clone();
         let ns = namespace.clone();
+        let init_sender = init_tx.clone();
         async move {
             let provider = local_inner
                 .provider_manager
@@ -80,6 +84,9 @@ async fn start_assignments_listener(
                             for sa in &ns_assignments.unwrap().assignments {
                                 assignments_ref.insert(sa.shard, sa.clone());
                             }
+                            if !init_sender.is_closed() {
+                                let _ = init_sender.send(()).await;
+                            }
                         }
                         Err(stream_status) => {
                              return Err(backoff::Error::transient(stream_status))
@@ -91,12 +98,13 @@ async fn start_assignments_listener(
         }
     };
     let backoff = ExponentialBackoff::default();
-    backoff::future::retry_notify(backoff, op_defer, |err, duration| {
+    let _ = backoff::future::retry_notify(backoff, op_defer, |err, duration| {
         warn!(
             "Transient failure receiving shard assignments. error: {:?} retry-after: {:?}.",
             err, duration
         )
-    });
+    })
+    .await;
 }
 
 impl ShardManager {
@@ -106,12 +114,16 @@ impl ShardManager {
             provider_manager: options.provider_manager,
             current_assignments: Arc::new(DashMap::new()),
         });
+        let (init_tx, mut init_rx) = mpsc::channel(1);
         let assignment_handle = tokio::spawn(start_assignments_listener(
-            options.address,
             context.clone(),
+            options.address,
             options.namespace.clone(),
             inner.clone(),
+            init_tx,
         ));
+
+        init_rx.recv().await;
         let sm = ShardManager {
             namespace: options.namespace,
             inner,

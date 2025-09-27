@@ -18,5 +18,9 @@ num_cpus = "1.16"
 tokio-util = "0.7"
 log = "0.4"
 
+[dev-dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 [build-dependencies]
 tonic-build = "0.13.1"
