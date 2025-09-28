@@ -4,8 +4,12 @@ use crate::errors::OxiaError;
 use crate::errors::OxiaError::{
     KeyLeaderNotFound, KeyNotFound, SessionDoesNotExist, UnexpectedStatus, UnexpectedVersionId,
 };
-use crate::operations::{DeleteOperation, GetOperation, Operation, PutOperation};
-use crate::oxia::{KeyComparisonType, ListRequest, ListResponse, Status, Version};
+use crate::operations::{
+    DeleteOperation, DeleteRangeOperation, GetOperation, Operation, PutOperation,
+};
+use crate::oxia::{
+    KeyComparisonType, ListRequest, ListResponse, RangeScanRequest, Status, Version,
+};
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::{ShardManager, ShardManagerOptions};
 use crate::write_stream_manager::WriteStreamManager;
@@ -51,7 +55,9 @@ pub struct ListResult {
 pub struct RangeScanOptions {}
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RangeScanResult {}
+pub struct RangeScanResult {
+    pub records: Vec<GetResult>,
+}
 
 pub struct GetSequenceUpdatesOptions {}
 
@@ -78,18 +84,20 @@ pub trait Client: Send + Sync + Clone {
         options: ListOptions,
     ) -> Result<ListResult, OxiaError>;
 
-    async fn delete_range(
-        &self,
-        min_key_inclusive: String,
-        max_key_exclusive: String,
-        options: DeleteRangeOptions,
-    ) -> Result<(), OxiaError>;
     async fn range_scan(
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
         options: RangeScanOptions,
     ) -> Result<RangeScanResult, OxiaError>;
+
+    async fn delete_range(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
+        options: DeleteRangeOptions,
+    ) -> Result<(), OxiaError>;
+
     async fn get_notifications(&self) -> Result<UnboundedReceiver<Notification>, OxiaError>;
     async fn get_sequence_updates(
         &self,
@@ -105,8 +113,8 @@ pub(crate) struct Inner {
     pub(crate) provider_manager: Arc<ProviderManager>,
     pub(crate) shard_manager: Arc<ShardManager>,
     pub(crate) write_stream_manager: Arc<WriteStreamManager>,
-    pub(crate) write_batch_manager: DashMap<i64, BatchManager>,
-    pub(crate) read_batch_manager: DashMap<i64, BatchManager>,
+    pub(crate) write_batch_manager: DashMap<i64, Arc<BatchManager>>,
+    pub(crate) read_batch_manager: DashMap<i64, Arc<BatchManager>>,
 }
 
 #[derive(Clone)]
@@ -230,22 +238,91 @@ impl Client for ClientImpl {
         Ok(ListResult { keys: output_keys })
     }
 
-    async fn delete_range(
-        &self,
-        min_key_inclusive: String,
-        max_key_exclusive: String,
-        options: DeleteRangeOptions,
-    ) -> Result<(), OxiaError> {
-        todo!()
-    }
-
     async fn range_scan(
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
         options: RangeScanOptions,
     ) -> Result<RangeScanResult, OxiaError> {
-        todo!()
+        let mut join_set = JoinSet::new();
+        for (shard, leader) in self.inner.shard_manager.get_shards_leader() {
+            let provider_manager = self.inner.provider_manager.clone();
+            let min_key_inclusive_clone = min_key_inclusive.clone();
+            let max_key_exclusive_clone = max_key_exclusive.clone();
+            join_set.spawn(async move {
+                let client = provider_manager
+                    .get_provider(&leader.service_address)
+                    .await?;
+                let mut client_guard = client.lock().await;
+                let mut streaming = client_guard
+                    .range_scan(Request::new(RangeScanRequest {
+                        shard: Some(shard),
+                        start_inclusive: min_key_inclusive_clone,
+                        end_exclusive: max_key_exclusive_clone,
+                        secondary_index_name: None,
+                    }))
+                    .await?
+                    .into_inner();
+                let mut records = Vec::new();
+                loop {
+                    match streaming.next().await {
+                        Some(response) => match response {
+                            Ok(mut response) => records.append(&mut response.records),
+                            Err(err) => {
+                                return Err(UnexpectedStatus(err.to_string()));
+                            }
+                        },
+                        None => break,
+                    }
+                }
+                return Ok(records);
+            });
+        }
+        // todo: ordering by oxia sort
+        let mut output_records = Vec::new();
+        for result in join_set.join_all().await {
+            let records = result?;
+            for record in records {
+                output_records.push(GetResult {
+                    key: record.key.unwrap(),
+                    value: record.value,
+                    version: record.version.unwrap(),
+                });
+            }
+        }
+        Ok(RangeScanResult {
+            records: output_records,
+        })
+    }
+
+    async fn delete_range(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
+        options: DeleteRangeOptions,
+    ) -> Result<(), OxiaError> {
+        let mut join_set = JoinSet::new();
+        for (shard, leader) in self.inner.shard_manager.get_shards_leader() {
+            let min_key_inclusive_clone = min_key_inclusive.clone();
+            let max_key_exclusive_clone = max_key_exclusive.clone();
+            let batch_manager = self.get_or_init_batch_manager_with_shard(Batcher::Write, shard)?.clone();
+            join_set.spawn(async move {
+                let (tx, rx) = oneshot::channel();
+                batch_manager.add(Operation::DeleteRange(DeleteRangeOperation {
+                    callback: Some(tx),
+                    start_inclusive: min_key_inclusive_clone,
+                    end_exclusive: max_key_exclusive_clone,
+                }))?;
+                let response = rx
+                    .await
+                    .map_err(|err| UnexpectedStatus(err.to_string()))??;
+                check_status(response.status)
+            });
+        }
+        for result in join_set.join_all().await {
+            result?;
+        }
+        Ok(())
     }
 
     async fn get_notifications(&self) -> Result<UnboundedReceiver<Notification>, OxiaError> {
@@ -297,7 +374,7 @@ impl ClientImpl {
         &'_ self,
         batcher: Batcher,
         key: &str,
-    ) -> Result<RefMut<'_, i64, BatchManager>, OxiaError> {
+    ) -> Result<RefMut<'_, i64, Arc<BatchManager>>, OxiaError> {
         match self.inner.shard_manager.get_shard(&key) {
             Some(shard_id) => self.get_or_init_batch_manager_with_shard(batcher, shard_id),
             None => Err(KeyLeaderNotFound(key.to_string())),
@@ -308,9 +385,9 @@ impl ClientImpl {
         &self,
         batcher: Batcher,
         shard_id: i64,
-    ) -> Result<RefMut<'_, i64, BatchManager>, OxiaError> {
+    ) -> Result<RefMut<'_, i64, Arc<BatchManager>>, OxiaError> {
         let closure = || {
-            BatchManager::new(
+            Arc::new(BatchManager::new(
                 shard_id,
                 batcher.clone(),
                 self.inner.shard_manager.clone(),
@@ -318,7 +395,7 @@ impl ClientImpl {
                 self.inner.write_stream_manager.clone(),
                 self.inner.options.batch_linger.clone(),
                 self.inner.options.batch_max_size.clone(),
-            )
+            ))
         };
         Ok(match batcher {
             Batcher::Read => self

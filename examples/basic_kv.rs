@@ -1,5 +1,7 @@
 use log::info;
-use oxia_client_rust::client::{Client, GetOptions, ListOptions};
+use oxia_client_rust::client::{
+    Client, DeleteRangeOptions, GetOptions, ListOptions, RangeScanOptions,
+};
 use oxia_client_rust::client::{DeleteOptions, PutOptions};
 use oxia_client_rust::client_builder::OxiaClientBuilder;
 use tracing::level_filters::LevelFilter;
@@ -54,7 +56,11 @@ async fn main() {
     info!("list the keys. keys {:?}", list_result.keys);
 
     // range-scan
-
+    let range_scan_result = client
+        .range_scan("".to_string(), "/".to_string(), RangeScanOptions {})
+        .await
+        .unwrap();
+    info!("range_scan result: {:?}", range_scan_result);
 
     // get key-1
     let get_result = client.get(key1.clone(), GetOptions {}).await.unwrap();
@@ -69,6 +75,16 @@ async fn main() {
     info!("get the value again. error: {:?}", result.unwrap_err());
 
     // delete range
+    client
+        .delete_range("".to_string(), "/".to_string(), DeleteRangeOptions {})
+        .await
+        .unwrap();
+    info!("delete range keys.");
+    let list_result = client
+        .list("".to_string(), "/".to_string(), ListOptions {})
+        .await
+        .unwrap();
+    info!("list the keys. keys {:?}", list_result.keys);
 
     client.shutdown().await.unwrap();
 }

@@ -117,13 +117,15 @@ impl CompletableOperation<DeleteResponse> for DeleteOperation {
 
 pub struct DeleteRangeOperation {
     pub(crate) callback: Option<Sender<Result<DeleteRangeResponse, OxiaError>>>,
+    pub(crate) start_inclusive: String,
+    pub(crate) end_exclusive: String,
 }
 
 impl ToProtobuf<DeleteRangeRequest> for DeleteRangeOperation {
     fn to_proto(&self) -> DeleteRangeRequest {
         DeleteRangeRequest {
-            start_inclusive: "".to_string(),
-            end_exclusive: "".to_string(),
+            start_inclusive: self.start_inclusive.clone(),
+            end_exclusive: self.end_exclusive.clone(),
         }
     }
 }
