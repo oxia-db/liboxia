@@ -14,8 +14,17 @@ pub enum OxiaError {
     #[error("shard leader not found.  shard={0}")]
     ShardLeaderNotFound(i64),
 
-    #[error("key leader not found.  shard={0}")]
+    #[error("key leader not found.  key={0}")]
     KeyLeaderNotFound(String),
+
+    #[error("key not found")]
+    KeyNotFound(),
+
+    #[error("unexpected version id")]
+    UnexpectedVersionId(),
+
+    #[error("session does not exist")]
+    SessionDoesNotExist(),
 
     #[error("retryable")]
     InternalRetryable(),

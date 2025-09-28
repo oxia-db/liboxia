@@ -1,6 +1,6 @@
 use log::info;
-use oxia_client_rust::client::PutOptions;
 use oxia_client_rust::client::{Client, GetOptions};
+use oxia_client_rust::client::{DeleteOptions, PutOptions};
 use oxia_client_rust::client_builder::OxiaClientBuilder;
 use tracing::level_filters::LevelFilter;
 #[tokio::main]
@@ -30,5 +30,10 @@ async fn main() {
         "get the value. key {:?} value {:?} version {:?}",
         get_result.key, get_result.value, get_result.version
     );
+    client.delete(key.clone(), DeleteOptions {}).await.unwrap();
+    info!("deleted the key. key {:?} ", key.clone());
+
+    let result = client.get(key.clone(), GetOptions {}).await;
+    info!("get the value again. error: {:?}", result.unwrap_err());
     client.shutdown().await.unwrap();
 }

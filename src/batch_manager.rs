@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone)]
 pub enum Batcher {
     Read,
     Write,

@@ -72,15 +72,17 @@ impl CompletableOperation<PutResponse> for PutOperation {
     }
 }
 
-pub struct DeleteOperation {
+pub(crate) struct DeleteOperation {
     pub(crate) callback: Option<Sender<Result<DeleteResponse, OxiaError>>>,
+    pub(crate) key: String,
+    pub(crate) expected_version_id: Option<i64>,
 }
 
 impl ToProtobuf<DeleteRequest> for DeleteOperation {
     fn to_proto(&self) -> DeleteRequest {
         DeleteRequest {
-            key: "".to_string(),
-            expected_version_id: None,
+            key: self.key.clone(),
+            expected_version_id: self.expected_version_id,
         }
     }
 }

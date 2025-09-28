@@ -74,13 +74,14 @@ impl WriteStreamManager {
             w_stream.listen(streaming);
             Ok::<WriteStream, OxiaError>(w_stream)
         };
-        let cell = self
+        let mut cell = self
             .streams
             .entry(shard_id)
             .or_insert_with(|| OnceCell::new());
         let initialized = cell.initialized();
         let w_stream = cell.get_or_try_init(defer_init).await?;
         if !w_stream.is_alive().await {
+            cell.take();
             return Err(InternalRetryable());
         }
         if initialized {
