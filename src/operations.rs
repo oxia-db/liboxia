@@ -154,12 +154,12 @@ impl CompletableOperation<DeleteRangeResponse> for DeleteRangeOperation {
     }
 }
 
-pub struct GetOperation {
+pub(crate) struct GetOperation {
     pub(crate) callback: Option<Sender<Result<GetResponse, OxiaError>>>,
-    key: String,
-    include_value: bool,
-    comparison_type: KeyComparisonType,
-    secondary_index_name: Option<String>,
+    pub(crate) key: String,
+    pub(crate) include_value: bool,
+    pub(crate) comparison_type: KeyComparisonType,
+    pub(crate) secondary_index_name: Option<String>,
 }
 
 impl CompletableOperation<GetResponse> for GetOperation {

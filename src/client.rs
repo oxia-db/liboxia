@@ -2,22 +2,22 @@ use crate::batch_manager::{BatchManager, Batcher};
 use crate::client_options::OxiaClientOptions;
 use crate::errors::OxiaError;
 use crate::errors::OxiaError::{KeyLeaderNotFound, UnexpectedStatus};
-use crate::operations::{Operation, PutOperation};
-use crate::oxia::Version;
+use crate::operations::{GetOperation, Operation, PutOperation};
+use crate::oxia::{KeyComparisonType, Version};
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::{ShardManager, ShardManagerOptions};
 use crate::write_stream_manager::WriteStreamManager;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tonic::async_trait;
 
 pub struct PutOptions {}
 
 pub struct PutResult {
-    key: String,
-    version: Version,
+    pub key: String,
+    pub version: Version,
 }
 
 pub struct DeleteOptions {}
@@ -26,7 +26,11 @@ pub struct DeleteRangeOptions {}
 
 pub struct GetOptions {}
 
-pub struct GetResult {}
+pub struct GetResult {
+    pub key: String,
+    pub value: Option<Vec<u8>>,
+    pub version: Version,
+}
 
 pub struct ListOptions {}
 
@@ -41,7 +45,7 @@ pub struct GetSequenceUpdatesOptions {}
 pub struct Notification {}
 
 #[async_trait]
-pub trait Client {
+pub trait Client: Send + Sync + Clone {
     async fn put(
         &self,
         key: String,
@@ -69,23 +73,28 @@ pub trait Client {
         max_key_exclusive: String,
         options: RangeScanOptions,
     ) -> Result<RangeScanResult, OxiaError>;
-    async fn get_notifications(&self) -> Result<mpsc::UnboundedReceiver<Notification>, OxiaError>;
+    async fn get_notifications(&self) -> Result<UnboundedReceiver<Notification>, OxiaError>;
     async fn get_sequence_updates(
         &self,
         key: String,
         options: GetSequenceUpdatesOptions,
-    ) -> Result<mpsc::UnboundedReceiver<String>, OxiaError>;
+    ) -> Result<UnboundedReceiver<String>, OxiaError>;
 
     async fn shutdown(self) -> Result<(), OxiaError>;
 }
 
-pub(crate) struct ClientImpl {
+pub(crate) struct Inner {
     pub(crate) options: OxiaClientOptions,
     pub(crate) provider_manager: Arc<ProviderManager>,
     pub(crate) shard_manager: Arc<ShardManager>,
     pub(crate) write_stream_manager: Arc<WriteStreamManager>,
     pub(crate) write_batch_manager: DashMap<i64, BatchManager>,
     pub(crate) read_batch_manager: DashMap<i64, BatchManager>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ClientImpl {
+    inner: Arc<Inner>,
 }
 
 #[async_trait]
@@ -96,19 +105,23 @@ impl Client for ClientImpl {
         value: Vec<u8>,
         options: PutOptions,
     ) -> Result<PutResult, OxiaError> {
-        match self.shard_manager.get_shard(&key) {
+        match self.inner.shard_manager.get_shard(&key) {
             Some(shard_id) => {
-                let batch_manager = self.write_batch_manager.entry(shard_id).or_insert_with(|| {
-                    BatchManager::new(
-                        shard_id,
-                        Batcher::Write,
-                        self.shard_manager.clone(),
-                        self.provider_manager.clone(),
-                        self.write_stream_manager.clone(),
-                        self.options.batch_linger.clone(),
-                        self.options.batch_max_size.clone(),
-                    )
-                });
+                let batch_manager = self
+                    .inner
+                    .write_batch_manager
+                    .entry(shard_id)
+                    .or_insert_with(|| {
+                        BatchManager::new(
+                            shard_id,
+                            Batcher::Write,
+                            self.inner.shard_manager.clone(),
+                            self.inner.provider_manager.clone(),
+                            self.inner.write_stream_manager.clone(),
+                            self.inner.options.batch_linger.clone(),
+                            self.inner.options.batch_max_size.clone(),
+                        )
+                    });
                 let (tx, rx) = oneshot::channel();
                 batch_manager.add(Operation::Put(PutOperation {
                     callback: Some(tx),
@@ -147,7 +160,42 @@ impl Client for ClientImpl {
     }
 
     async fn get(&self, key: String, options: GetOptions) -> Result<GetResult, OxiaError> {
-        todo!()
+        match self.inner.shard_manager.get_shard(&key) {
+            Some(shard_id) => {
+                let batch_manager = self
+                    .inner
+                    .read_batch_manager
+                    .entry(shard_id)
+                    .or_insert_with(|| {
+                        BatchManager::new(
+                            shard_id,
+                            Batcher::Read,
+                            self.inner.shard_manager.clone(),
+                            self.inner.provider_manager.clone(),
+                            self.inner.write_stream_manager.clone(),
+                            self.inner.options.batch_linger.clone(),
+                            self.inner.options.batch_max_size.clone(),
+                        )
+                    });
+                let (tx, rx) = oneshot::channel();
+                batch_manager.add(Operation::Get(GetOperation {
+                    callback: Some(tx),
+                    key: key.clone(),
+                    include_value: true,
+                    comparison_type: KeyComparisonType::Equal,
+                    secondary_index_name: None,
+                }))?;
+                let get_response = rx
+                    .await
+                    .map_err(|err| UnexpectedStatus(err.to_string()))??;
+                Ok(GetResult {
+                    key: get_response.key.or(Some(key.clone())).unwrap(),
+                    value: get_response.value,
+                    version: get_response.version.unwrap(),
+                })
+            }
+            None => Err(KeyLeaderNotFound(key.clone())),
+        }
     }
 
     async fn list(
@@ -202,12 +250,14 @@ impl ClientImpl {
             provider_manager.clone(),
         ));
         Ok(ClientImpl {
-            options,
-            write_stream_manager,
-            provider_manager,
-            shard_manager,
-            write_batch_manager: DashMap::new(),
-            read_batch_manager: DashMap::new(),
+            inner: Arc::new(Inner {
+                options,
+                write_stream_manager,
+                provider_manager,
+                shard_manager,
+                write_batch_manager: DashMap::new(),
+                read_batch_manager: DashMap::new(),
+            }),
         })
     }
 }
