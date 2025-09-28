@@ -1,0 +1,16 @@
+[package]
+name = "liboxia-c"
+version = "0.0.1"
+edition = "2021"
+
+
+
+[lib]
+name = "liboxia_ffi"
+crate-type = ["cdylib"]
+
+
+[dependencies]
+liboxia = { workspace = true }
+tokio = { workspace = true }
+libc = { workspace = true }

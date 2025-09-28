@@ -1,0 +1,23 @@
+[package]
+name = "liboxia"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+backoff = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+dashmap = { workspace = true }
+xxhash-rust = { workspace = true }
+uuid = { workspace = true }
+tokio-util = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+tonic-build = {workspace = true}

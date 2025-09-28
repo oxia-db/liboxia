@@ -1,9 +1,10 @@
-[package]
-name = "liboxia"
-version = "0.0.1"
-edition = "2021"
+[workspace]
+members = [
+    "liboxia-native",
+    "liboxia-ffi"
+]
 
-[dependencies]
+[workspace.dependencies]
 backoff = { version = "0.4.0", features = ["tokio"] }
 tonic = "0.13"
 prost = "0.13"
@@ -14,10 +15,8 @@ xxhash-rust = { version = "0.8.5", features = ["xxh32", "const_xxh32"] }
 uuid = { version = "1.7", features = ["v4"] }
 tokio-util = "0.7"
 log = "0.4"
-
-[dev-dependencies]
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[build-dependencies]
 tonic-build = "0.13.1"
+liboxia = { path = "liboxia-native" }
+libc = "0.2"
