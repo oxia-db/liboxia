@@ -1,4 +1,5 @@
 use crate::errors::OxiaError;
+use crate::errors::OxiaError::InternalRetryable;
 use crate::oxia::{WriteRequest, WriteResponse};
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
@@ -22,45 +23,66 @@ pub struct WriteStreamManager {
 
 impl WriteStreamManager {
     pub async fn write(&self, request: WriteRequest) -> Result<WriteResponse, OxiaError> {
+        // todo: make request Rc
+        loop {
+            let result = self.write0(request.clone()).await;
+            if result.is_ok() {
+                return result;
+            }
+            if result.is_err() {
+                let error = result.unwrap_err();
+                match error {
+                    InternalRetryable() => continue,
+                    _ => return Err(error),
+                }
+            }
+        }
+    }
+
+    async fn write0(&self, request: WriteRequest) -> Result<WriteResponse, OxiaError> {
         let shard_id = request.shard.unwrap();
         let option = self.shard_manager.get_leader(shard_id);
         if option.is_none() {
             return Err(OxiaError::ShardLeaderNotFound(shard_id));
         }
+        let defer_init = || async {
+            let client = self
+                .provider_manager
+                .get_provider(&option.unwrap().service_address)
+                .await?;
+            let (tx, rx) = mpsc::unbounded_channel();
+            let mut client_guard = client.lock().await;
+            let mut write_stream_request = Request::new(UnboundedReceiverStream::new(rx));
+            let write_stream_request_metadata = write_stream_request.metadata_mut();
+            write_stream_request_metadata.insert(
+                WRITE_STREAM_HEADER_NAMESPACE,
+                self.namespace.parse().unwrap(),
+            );
+            write_stream_request_metadata.insert(
+                WRITE_STREAM_HEADER_SHARD_ID,
+                shard_id.to_string().parse().unwrap(),
+            );
+            // https://github.com/hyperium/hyper/issues/3737
+            // We should put the first message into the stream to trigger it to actually send.
+            // otherwise, write_stream will hang forever.
+            let w_stream = WriteStream::new(tx);
+            w_stream.send_defer(request.clone()).await?;
+            let streaming = client_guard
+                .write_stream(write_stream_request)
+                .await?
+                .into_inner();
+            w_stream.listen(streaming);
+            Ok::<WriteStream, OxiaError>(w_stream)
+        };
         let cell = self
             .streams
             .entry(shard_id)
             .or_insert_with(|| OnceCell::new());
         let initialized = cell.initialized();
-        let w_stream = cell
-            .get_or_try_init(|| async {
-                let client = self
-                    .provider_manager
-                    .get_provider(&option.unwrap().service_address)
-                    .await?;
-                let (tx, rx) = mpsc::unbounded_channel();
-                let mut client_guard = client.lock().await;
-                let mut write_stream_request = Request::new(UnboundedReceiverStream::new(rx));
-                let write_stream_request_metadata = write_stream_request.metadata_mut();
-                write_stream_request_metadata.insert(
-                    WRITE_STREAM_HEADER_NAMESPACE,
-                    self.namespace.parse().unwrap(),
-                );
-                write_stream_request_metadata.insert(
-                    WRITE_STREAM_HEADER_SHARD_ID,
-                    shard_id.to_string().parse().unwrap(),
-                );
-                // https://github.com/hyperium/hyper/issues/3737
-                let w_stream = WriteStream::new(tx);
-                w_stream.send_defer(request.clone()).await?;
-                let streaming = client_guard
-                    .write_stream(write_stream_request)
-                    .await?
-                    .into_inner();
-                w_stream.listen(streaming);
-                Ok::<WriteStream, OxiaError>(w_stream)
-            })
-            .await?;
+        let w_stream = cell.get_or_try_init(defer_init).await?;
+        if !w_stream.is_alive().await {
+            return Err(InternalRetryable());
+        }
         if initialized {
             return w_stream.send(request).await;
         }

@@ -1,16 +1,15 @@
 use crate::errors::OxiaError;
 use crate::errors::OxiaError::UnexpectedStatus;
-use crate::oxia::{Status, WriteRequest, WriteResponse};
+use crate::oxia::{WriteRequest, WriteResponse};
 use log::{info, warn};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::Receiver;
 use tokio::sync::{oneshot, Mutex};
-use tokio::task;
 use tokio_util::sync::CancellationToken;
 use tonic::codegen::tokio_stream::StreamExt;
-use tonic::{Response, Streaming};
+use tonic::{Streaming};
 
 pub(crate) struct Inflight {
     pub(crate) future: oneshot::Sender<WriteResponse>,
@@ -53,6 +52,10 @@ impl WriteStream {
         let mut guard = self.defer_response.lock().await;
         *guard = Some(rx);
         Ok(())
+    }
+
+    pub(crate) async fn is_alive(&self) -> bool {
+        self.inner.lock().await.alive
     }
 
     pub(crate) async fn send(&self, request: WriteRequest) -> Result<WriteResponse, OxiaError> {

@@ -75,6 +75,8 @@ pub trait Client {
         key: String,
         options: GetSequenceUpdatesOptions,
     ) -> Result<mpsc::UnboundedReceiver<String>, OxiaError>;
+
+    async fn shutdown(self) -> Result<(), OxiaError>;
 }
 
 pub(crate) struct ClientImpl {
@@ -176,6 +178,10 @@ impl Client for ClientImpl {
         options: GetSequenceUpdatesOptions,
     ) -> Result<UnboundedReceiver<String>, OxiaError> {
         todo!()
+    }
+
+    async fn shutdown(self) -> Result<(), OxiaError> {
+        Ok(())
     }
 }
 

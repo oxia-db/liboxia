@@ -13,7 +13,6 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
-use tonic::include_file_descriptor_set;
 
 pub enum Batcher {
     Read,
@@ -36,6 +35,7 @@ impl Batcher {
 }
 
 pub struct BatchManager {
+    context: CancellationToken,
     tx: UnboundedSender<Operation>,
     batch_handle: JoinHandle<()>,
 }
@@ -53,7 +53,7 @@ impl BatchManager {
         let (tx, rx) = mpsc::unbounded_channel();
         let context = CancellationToken::new();
         let handle = tokio::spawn(start_batcher(
-            context,
+            context.clone(),
             rx,
             shard_id,
             batcher,
@@ -64,6 +64,7 @@ impl BatchManager {
             batch_max_size,
         ));
         BatchManager {
+            context,
             tx,
             batch_handle: handle,
         }
@@ -72,6 +73,14 @@ impl BatchManager {
     pub fn add(&self, operation: Operation) -> Result<(), OxiaError> {
         self.tx
             .send(operation)
+            .map_err(|err| UnexpectedStatus(err.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn shutdown(self) -> Result<(), OxiaError> {
+        self.context.cancel();
+        self.batch_handle
+            .await
             .map_err(|err| UnexpectedStatus(err.to_string()))?;
         Ok(())
     }
