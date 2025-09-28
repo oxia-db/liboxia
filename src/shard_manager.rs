@@ -1,3 +1,4 @@
+use crate::address::ensure_protocol;
 use crate::errors::OxiaError;
 use crate::errors::OxiaError::UnexpectedStatus;
 use crate::oxia::shard_assignment::ShardBoundaries;
@@ -6,13 +7,13 @@ use crate::provider_manager::ProviderManager;
 use backoff::ExponentialBackoff;
 use dashmap::DashMap;
 use log::{info, warn};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::codegen::tokio_stream::StreamExt;
-use tonic::{Status};
-use crate::address::ensure_protocol;
+use tonic::Status;
 
 pub(crate) struct Node {
     pub service_address: String,
@@ -161,6 +162,20 @@ impl ShardManager {
             }
         }
         None
+    }
+
+    // todo: consider iterator to avoid clone
+    pub fn get_shards_leader(&self) -> HashMap<i64, Node> {
+        let mut map = HashMap::with_capacity(self.inner.current_assignments.len());
+        for item in self.inner.current_assignments.iter() {
+            map.insert(
+                item.shard,
+                Node {
+                    service_address: ensure_protocol(item.leader.clone()),
+                },
+            );
+        }
+        map
     }
 
     pub fn get_shard_leader(&self, key: &str) -> Option<Node> {

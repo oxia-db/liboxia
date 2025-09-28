@@ -5,16 +5,20 @@ use crate::errors::OxiaError::{
     KeyLeaderNotFound, KeyNotFound, SessionDoesNotExist, UnexpectedStatus, UnexpectedVersionId,
 };
 use crate::operations::{DeleteOperation, GetOperation, Operation, PutOperation};
-use crate::oxia::{KeyComparisonType, Status, Version};
+use crate::oxia::{KeyComparisonType, ListRequest, ListResponse, Status, Version};
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::{ShardManager, ShardManagerOptions};
 use crate::write_stream_manager::WriteStreamManager;
 use dashmap::mapref::one::RefMut;
 use dashmap::DashMap;
+use std::cmp::min;
 use std::sync::Arc;
+use tokio::io::join;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
-use tonic::async_trait;
+use tokio::task::JoinSet;
+use tonic::codegen::tokio_stream::StreamExt;
+use tonic::{async_trait, Request};
 
 pub struct PutOptions {}
 
@@ -40,7 +44,9 @@ pub struct GetResult {
 pub struct ListOptions {}
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ListResult {}
+pub struct ListResult {
+    pub keys: Vec<String>,
+}
 
 pub struct RangeScanOptions {}
 
@@ -181,7 +187,47 @@ impl Client for ClientImpl {
         max_key_exclusive: String,
         options: ListOptions,
     ) -> Result<ListResult, OxiaError> {
-        todo!()
+        let mut join_set = JoinSet::new();
+        for (shard, leader) in self.inner.shard_manager.get_shards_leader() {
+            let provider_manager = self.inner.provider_manager.clone();
+            let min_key_inclusive_clone = min_key_inclusive.clone();
+            let max_key_exclusive_clone = max_key_exclusive.clone();
+            join_set.spawn(async move {
+                let client = provider_manager
+                    .get_provider(&leader.service_address)
+                    .await?;
+                let mut client_guard = client.lock().await;
+                let mut streaming = client_guard
+                    .list(Request::new(ListRequest {
+                        shard: Some(shard),
+                        start_inclusive: min_key_inclusive_clone,
+                        end_exclusive: max_key_exclusive_clone,
+                        secondary_index_name: None,
+                    }))
+                    .await?
+                    .into_inner();
+                let mut keys = Vec::new();
+                loop {
+                    match streaming.next().await {
+                        Some(response) => match response {
+                            Ok(mut response) => keys.append(&mut response.keys),
+                            Err(err) => {
+                                return Err(UnexpectedStatus(err.to_string()));
+                            }
+                        },
+                        None => break,
+                    }
+                }
+                return Ok(keys);
+            });
+        }
+        // todo: ordering by oxia sort
+        let mut output_keys = Vec::new();
+        for result in join_set.join_all().await {
+            let mut keys = result?;
+            output_keys.append(&mut keys);
+        }
+        Ok(ListResult { keys: output_keys })
     }
 
     async fn delete_range(
@@ -253,33 +299,39 @@ impl ClientImpl {
         key: &str,
     ) -> Result<RefMut<'_, i64, BatchManager>, OxiaError> {
         match self.inner.shard_manager.get_shard(&key) {
-            Some(shard_id) => {
-                let closure = || {
-                    BatchManager::new(
-                        shard_id,
-                        batcher.clone(),
-                        self.inner.shard_manager.clone(),
-                        self.inner.provider_manager.clone(),
-                        self.inner.write_stream_manager.clone(),
-                        self.inner.options.batch_linger.clone(),
-                        self.inner.options.batch_max_size.clone(),
-                    )
-                };
-                Ok(match batcher {
-                    Batcher::Read => self
-                        .inner
-                        .read_batch_manager
-                        .entry(shard_id)
-                        .or_insert_with(closure),
-                    Batcher::Write => self
-                        .inner
-                        .write_batch_manager
-                        .entry(shard_id)
-                        .or_insert_with(closure),
-                })
-            }
+            Some(shard_id) => self.get_or_init_batch_manager_with_shard(batcher, shard_id),
             None => Err(KeyLeaderNotFound(key.to_string())),
         }
+    }
+
+    fn get_or_init_batch_manager_with_shard(
+        &self,
+        batcher: Batcher,
+        shard_id: i64,
+    ) -> Result<RefMut<'_, i64, BatchManager>, OxiaError> {
+        let closure = || {
+            BatchManager::new(
+                shard_id,
+                batcher.clone(),
+                self.inner.shard_manager.clone(),
+                self.inner.provider_manager.clone(),
+                self.inner.write_stream_manager.clone(),
+                self.inner.options.batch_linger.clone(),
+                self.inner.options.batch_max_size.clone(),
+            )
+        };
+        Ok(match batcher {
+            Batcher::Read => self
+                .inner
+                .read_batch_manager
+                .entry(shard_id)
+                .or_insert_with(closure),
+            Batcher::Write => self
+                .inner
+                .write_batch_manager
+                .entry(shard_id)
+                .or_insert_with(closure),
+        })
     }
 }
 
