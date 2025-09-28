@@ -1,9 +1,9 @@
 use log::info;
-use oxia_client_rust::client::{
+use liboxia::client::{
     Client, DeleteRangeOptions, GetOptions, ListOptions, RangeScanOptions,
 };
-use oxia_client_rust::client::{DeleteOptions, PutOptions};
-use oxia_client_rust::client_builder::OxiaClientBuilder;
+use liboxia::client::{DeleteOptions, PutOptions};
+use liboxia::client_builder::OxiaClientBuilder;
 use tracing::level_filters::LevelFilter;
 #[tokio::main]
 async fn main() {
