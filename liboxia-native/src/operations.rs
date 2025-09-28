@@ -1,3 +1,4 @@
+use crate::client::PutOption;
 use crate::errors::OxiaError;
 use crate::oxia::{
     DeleteRangeRequest, DeleteRangeResponse, DeleteRequest, DeleteResponse, GetRequest,
@@ -17,6 +18,7 @@ pub trait ToProtobuf<T> {
     fn to_proto(&self) -> T;
 }
 
+#[derive(Default)]
 pub(crate) struct PutOperation {
     pub(crate) callback: Option<Sender<Result<PutResponse, OxiaError>>>,
     pub(crate) key: String,
@@ -27,6 +29,32 @@ pub(crate) struct PutOperation {
     pub(crate) partition_key: Option<String>,
     pub(crate) sequence_key_delta: Vec<u64>,
     pub(crate) secondary_indexes: Vec<SecondaryIndex>,
+}
+
+impl From<Vec<PutOption>> for PutOperation {
+    fn from(options: Vec<PutOption>) -> Self {
+        let mut operation = PutOperation::default();
+        for option in options {
+            match option {
+                PutOption::ExpectVersionId(expected_version_id) => {
+                    operation.expected_version_id = Some(expected_version_id)
+                }
+                PutOption::PartitionKey(partition_key) => {
+                    operation.partition_key = Some(partition_key)
+                }
+                PutOption::SequenceKeyDelta(sequence_key_delta) => {
+                    operation.sequence_key_delta = sequence_key_delta
+                }
+                PutOption::SecondaryIndexes(secondary_indexes) => {
+                    operation.secondary_indexes = secondary_indexes
+                },
+                PutOption::Ephemeral() => {
+                    // todo: support session manager
+                }
+            }
+        }
+        operation
+    }
 }
 
 impl ToProtobuf<PutRequest> for PutOperation {

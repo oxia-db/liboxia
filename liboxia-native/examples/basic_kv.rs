@@ -1,9 +1,9 @@
-use log::info;
+use liboxia::client::DeleteOptions;
 use liboxia::client::{
-    Client, DeleteRangeOptions, GetOptions, ListOptions, RangeScanOptions,
+    Client, DeleteRangeOptions, GetOptions, ListOptions, PutOption, RangeScanOptions,
 };
-use liboxia::client::{DeleteOptions, PutOptions};
 use liboxia::client_builder::OxiaClientBuilder;
+use log::info;
 use tracing::level_filters::LevelFilter;
 #[tokio::main]
 async fn main() {
@@ -23,7 +23,7 @@ async fn main() {
     let payload = "payload".to_string().into_bytes();
     // put key - 1
     let put_result = client
-        .put(key1.clone(), payload.clone(), PutOptions {})
+        .put(key1.clone(), payload.clone(), PutOption::none())
         .await
         .unwrap();
     info!(
@@ -32,7 +32,7 @@ async fn main() {
     );
     // put key - 2
     let put_result = client
-        .put(key2.clone(), payload.clone(), PutOptions {})
+        .put(key2.clone(), payload.clone(), PutOption::none())
         .await
         .unwrap();
     info!(
@@ -41,7 +41,7 @@ async fn main() {
     );
     // put key - 3
     let put_result = client
-        .put(key3.clone(), payload.clone(), PutOptions {})
+        .put(key3.clone(), payload.clone(), PutOption::none())
         .await
         .unwrap();
     info!(

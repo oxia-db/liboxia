@@ -8,23 +8,33 @@ use crate::operations::{
     DeleteOperation, DeleteRangeOperation, GetOperation, Operation, PutOperation,
 };
 use crate::oxia::{
-    KeyComparisonType, ListRequest, ListResponse, RangeScanRequest, Status, Version,
+    KeyComparisonType, ListRequest, RangeScanRequest, SecondaryIndex, Status, Version,
 };
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::{ShardManager, ShardManagerOptions};
 use crate::write_stream_manager::WriteStreamManager;
 use dashmap::mapref::one::RefMut;
 use dashmap::DashMap;
-use std::cmp::min;
 use std::sync::Arc;
-use tokio::io::join;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use tonic::codegen::tokio_stream::StreamExt;
 use tonic::{async_trait, Request};
 
-pub struct PutOptions {}
+pub enum PutOption {
+    ExpectVersionId(i64),
+    PartitionKey(String),
+    SequenceKeyDelta(Vec<u64>),
+    SecondaryIndexes(Vec<SecondaryIndex>),
+    Ephemeral()
+}
+
+impl PutOption {
+    pub fn none() -> Vec<PutOption> {
+        vec![]
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PutResult {
@@ -70,7 +80,7 @@ pub trait Client: Send + Sync + Clone {
         &self,
         key: String,
         value: Vec<u8>,
-        options: PutOptions,
+        options: Vec<PutOption>,
     ) -> Result<PutResult, OxiaError>;
 
     async fn delete(&self, key: String, options: DeleteOptions) -> Result<(), OxiaError>;
@@ -128,21 +138,20 @@ impl Client for ClientImpl {
         &self,
         key: String,
         value: Vec<u8>,
-        options: PutOptions,
+        options: Vec<PutOption>,
     ) -> Result<PutResult, OxiaError> {
-        let batch_manager = self.get_or_init_batch_manager(Batcher::Write, &key)?;
         let (tx, rx) = oneshot::channel();
-        batch_manager.add(Operation::Put(PutOperation {
-            callback: Some(tx),
-            key: key.clone(),
-            value,
-            expected_version_id: None,
-            session_id: None,
-            client_identity: None,
-            partition_key: None,
-            sequence_key_delta: vec![],
-            secondary_indexes: vec![],
-        }))?;
+        let mut operation: PutOperation = options.into();
+        operation.callback = Some(tx);
+        operation.key = key.clone();
+        operation.value = value.clone();
+        operation.client_identity = Some(self.inner.options.identity.clone());
+        let batch_manager = match &operation.partition_key {
+            None => self.get_or_init_batch_manager(Batcher::Write, &key)?,
+            Some(partition_key) => self.get_or_init_batch_manager(Batcher::Write, partition_key)?,
+        };
+        // todo: support session manager
+        batch_manager.add(Operation::Put(operation))?;
         let put_response = rx
             .await
             .map_err(|err| UnexpectedStatus(err.to_string()))??;
@@ -305,7 +314,9 @@ impl Client for ClientImpl {
         for (shard, leader) in self.inner.shard_manager.get_shards_leader() {
             let min_key_inclusive_clone = min_key_inclusive.clone();
             let max_key_exclusive_clone = max_key_exclusive.clone();
-            let batch_manager = self.get_or_init_batch_manager_with_shard(Batcher::Write, shard)?.clone();
+            let batch_manager = self
+                .get_or_init_batch_manager_with_shard(Batcher::Write, shard)?
+                .clone();
             join_set.spawn(async move {
                 let (tx, rx) = oneshot::channel();
                 batch_manager.add(Operation::DeleteRange(DeleteRangeOperation {

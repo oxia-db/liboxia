@@ -1,9 +1,9 @@
 use std::ffi::{c_char, CStr, CString};
 use std::slice;
-use tokio::runtime::Runtime;
 use std::sync::OnceLock;
+use tokio::runtime::Runtime;
 
-use liboxia::client::{Client, ClientImpl, GetOptions, PutOptions};
+use liboxia::client::{Client, ClientImpl, GetOptions, PutOption};
 use liboxia::client_options::OxiaClientOptions;
 use liboxia::errors::OxiaError;
 
@@ -87,8 +87,18 @@ pub extern "C" fn oxia_client_new(
     client_ptr: *mut *mut OxiaClient,
 ) -> COxiaError {
     let rt = get_runtime();
-    let service_address = unsafe { CStr::from_ptr(options.service_address).to_str().unwrap().to_string() };
-    let namespace = unsafe { CStr::from_ptr(options.namespace).to_str().unwrap().to_string() };
+    let service_address = unsafe {
+        CStr::from_ptr(options.service_address)
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    let namespace = unsafe {
+        CStr::from_ptr(options.namespace)
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
 
     let native_options = OxiaClientOptions {
         service_address,
@@ -131,7 +141,7 @@ pub extern "C" fn oxia_client_put(
     let value = unsafe { slice::from_raw_parts(value, value_len).to_vec() };
     let result = rt.block_on(async {
         let rust_client = unsafe { &*client };
-        rust_client.0.put(key, value, PutOptions {}).await
+        rust_client.0.put(key, value, PutOption::none()).await
     });
 
     match result {
@@ -230,8 +240,11 @@ pub extern "C" fn oxia_get_result_free(result: *mut COxiaGetResult) {
         }
         if !box_result.value.is_null() {
             unsafe {
-                let _ =
-                    Vec::from_raw_parts(box_result.value, box_result.value_len, box_result.value_len);
+                let _ = Vec::from_raw_parts(
+                    box_result.value,
+                    box_result.value_len,
+                    box_result.value_len,
+                );
             }
         }
     }
