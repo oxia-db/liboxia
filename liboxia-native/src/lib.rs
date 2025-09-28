@@ -1,7 +1,7 @@
 pub mod client;
 pub mod client_builder;
-mod client_options;
-mod errors;
+pub mod client_options;
+pub mod errors;
 mod shard_manager;
 mod batch;
 mod operations;

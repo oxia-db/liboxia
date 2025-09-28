@@ -118,7 +118,7 @@ pub(crate) struct Inner {
 }
 
 #[derive(Clone)]
-pub(crate) struct ClientImpl {
+pub struct ClientImpl {
     inner: Arc<Inner>,
 }
 
@@ -343,7 +343,7 @@ impl Client for ClientImpl {
 }
 
 impl ClientImpl {
-    pub async fn new(options: OxiaClientOptions) -> Result<impl Client, OxiaError> {
+    pub async fn new(options: OxiaClientOptions) -> Result<ClientImpl, OxiaError> {
         let provider_manager = Arc::new(ProviderManager::new());
         let shard_manager = Arc::new(
             ShardManager::new(ShardManagerOptions {
