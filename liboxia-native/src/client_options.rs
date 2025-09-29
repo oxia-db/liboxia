@@ -8,6 +8,7 @@ pub struct OxiaClientOptions {
     pub identity: String,
     pub batch_linger: Duration,
     pub batch_max_size: u32,
+    pub session_timeout: Duration,
 }
 
 impl Default for OxiaClientOptions {
@@ -18,6 +19,7 @@ impl Default for OxiaClientOptions {
             identity: Uuid::new_v4().to_string(),
             batch_linger: Duration::from_millis(5),
             batch_max_size: 128 * 1024,
+            session_timeout: Duration::from_secs(15),
         }
     }
 }

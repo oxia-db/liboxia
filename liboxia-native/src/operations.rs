@@ -29,6 +29,9 @@ pub(crate) struct PutOperation {
     pub(crate) partition_key: Option<String>,
     pub(crate) sequence_key_delta: Vec<u64>,
     pub(crate) secondary_indexes: Vec<SecondaryIndex>,
+
+    // internal status for helping to decide whether to use the session
+    pub(crate) ephemeral: bool,
 }
 
 impl From<Vec<PutOption>> for PutOperation {
@@ -47,10 +50,8 @@ impl From<Vec<PutOption>> for PutOperation {
                 }
                 PutOption::SecondaryIndexes(secondary_indexes) => {
                     operation.secondary_indexes = secondary_indexes
-                },
-                PutOption::Ephemeral() => {
-                    // todo: support session manager
                 }
+                PutOption::Ephemeral() => operation.ephemeral = true,
             }
         }
         operation

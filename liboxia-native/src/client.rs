@@ -11,6 +11,7 @@ use crate::oxia::{
     KeyComparisonType, ListRequest, RangeScanRequest, SecondaryIndex, Status, Version,
 };
 use crate::provider_manager::ProviderManager;
+use crate::session_manager::SessionManager;
 use crate::shard_manager::{ShardManager, ShardManagerOptions};
 use crate::write_stream_manager::WriteStreamManager;
 use dashmap::mapref::one::RefMut;
@@ -27,7 +28,7 @@ pub enum PutOption {
     PartitionKey(String),
     SequenceKeyDelta(Vec<u64>),
     SecondaryIndexes(Vec<SecondaryIndex>),
-    Ephemeral()
+    Ephemeral(),
 }
 
 impl PutOption {
@@ -122,6 +123,7 @@ pub(crate) struct Inner {
     pub(crate) options: OxiaClientOptions,
     pub(crate) provider_manager: Arc<ProviderManager>,
     pub(crate) shard_manager: Arc<ShardManager>,
+    pub(crate) session_manager: Arc<SessionManager>,
     pub(crate) write_stream_manager: Arc<WriteStreamManager>,
     pub(crate) write_batch_manager: DashMap<i64, Arc<BatchManager>>,
     pub(crate) read_batch_manager: DashMap<i64, Arc<BatchManager>>,
@@ -150,7 +152,10 @@ impl Client for ClientImpl {
             None => self.get_or_init_batch_manager(Batcher::Write, &key)?,
             Some(partition_key) => self.get_or_init_batch_manager(Batcher::Write, partition_key)?,
         };
-        // todo: support session manager
+        let shard_id = batch_manager.key().clone();
+        if operation.ephemeral {
+            operation.session_id = Some(self.inner.session_manager.get_session_id(shard_id).await?)
+        }
         batch_manager.add(Operation::Put(operation))?;
         let put_response = rx
             .await
@@ -369,12 +374,19 @@ impl ClientImpl {
             shard_manager.clone(),
             provider_manager.clone(),
         ));
+        let session_manager = Arc::new(SessionManager::new(
+            options.identity.clone(),
+            options.session_timeout,
+            shard_manager.clone(),
+            provider_manager.clone(),
+        ));
         Ok(ClientImpl {
             inner: Arc::new(Inner {
                 options,
                 write_stream_manager,
                 provider_manager,
                 shard_manager,
+                session_manager,
                 write_batch_manager: DashMap::new(),
                 read_batch_manager: DashMap::new(),
             }),

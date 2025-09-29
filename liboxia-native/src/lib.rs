@@ -10,6 +10,8 @@ mod write_stream_manager;
 mod write_stream;
 mod batch_manager;
 mod address;
+mod session_manager;
+mod status;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 pub mod oxia {
