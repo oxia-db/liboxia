@@ -216,7 +216,7 @@ impl Client for ClientImpl {
             let max_key_exclusive_clone = max_key_exclusive.clone();
             join_set.spawn(async move {
                 let client = provider_manager
-                    .get_provider(&leader.service_address)
+                    .get_provider(leader.service_address)
                     .await?;
                 let mut client_guard = client.lock().await;
                 let mut streaming = client_guard
@@ -265,7 +265,7 @@ impl Client for ClientImpl {
             let max_key_exclusive_clone = max_key_exclusive.clone();
             join_set.spawn(async move {
                 let client = provider_manager
-                    .get_provider(&leader.service_address)
+                    .get_provider(leader.service_address)
                     .await?;
                 let mut client_guard = client.lock().await;
                 let mut streaming = client_guard

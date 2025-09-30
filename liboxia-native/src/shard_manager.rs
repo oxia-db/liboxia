@@ -55,7 +55,7 @@ async fn start_assignments_listener(
         async move {
             let provider = local_inner
                 .provider_manager
-                .get_provider(local_address.as_str())
+                .get_provider(local_address)
                 .await
                 .map_err(|err| backoff::Error::transient(Status::internal(err.to_string())))?;
             let mut guard_provider = provider.lock().await;

@@ -98,7 +98,7 @@ impl ReadBatch {
         let node = option.unwrap();
         match self
             .provider_manager
-            .get_provider(&node.service_address)
+            .get_provider(node.service_address)
             .await
         {
             Ok(provider) => {

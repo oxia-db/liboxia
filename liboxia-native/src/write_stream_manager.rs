@@ -48,7 +48,7 @@ impl WriteStreamManager {
         let defer_init = || async {
             let client = self
                 .provider_manager
-                .get_provider(&option.unwrap().service_address)
+                .get_provider(option.unwrap().service_address)
                 .await?;
             let (tx, rx) = mpsc::unbounded_channel();
             let mut client_guard = client.lock().await;

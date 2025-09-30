@@ -81,7 +81,7 @@ async fn start_keep_alive(
                 None => Err(Error::transient(ShardLeaderNotFound(shard_id))),
                 Some(leader) => {
                     let provider = local_provider_manager
-                        .get_provider(&leader.service_address)
+                        .get_provider(leader.service_address)
                         .await?;
                     loop {
                         tokio::select! {
@@ -154,8 +154,7 @@ impl SessionManager {
                 match self.shard_manager.get_leader(shard_id) {
                     None => Err(ShardLeaderNotFound(shard_id)),
                     Some(node) => {
-                        let leader = node.service_address;
-                        let client = self.provider_manager.get_provider(&leader).await?;
+                        let client = self.provider_manager.get_provider(node.service_address).await?;
                         let mut client_guard = client.lock().await;
                         let response = client_guard
                             .create_session(Request::new(CreateSessionRequest {
