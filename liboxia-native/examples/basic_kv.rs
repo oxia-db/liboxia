@@ -1,4 +1,4 @@
-use liboxia::client::DeleteOptions;
+use liboxia::client::DeleteOption;
 use liboxia::client::{
     Client, DeleteRangeOptions, GetOptions, ListOptions, PutOption, RangeScanOptions,
 };
@@ -69,7 +69,10 @@ async fn main() {
         get_result.key, get_result.value, get_result.version
     );
     // delete key-1
-    client.delete(key1.clone(), DeleteOptions {}).await.unwrap();
+    client
+        .delete(key1.clone(), DeleteOption::none())
+        .await
+        .unwrap();
     info!("deleted the key-1. key {:?} ", key1.clone());
     let result = client.get(key1.clone(), GetOptions {}).await;
     info!("get the value again. error: {:?}", result.unwrap_err());

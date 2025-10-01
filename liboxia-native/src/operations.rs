@@ -1,4 +1,4 @@
-use crate::client::PutOption;
+use crate::client::{DeleteOption, PutOption};
 use crate::errors::OxiaError;
 use crate::oxia::{
     DeleteRangeRequest, DeleteRangeResponse, DeleteRequest, DeleteResponse, GetRequest,
@@ -101,10 +101,12 @@ impl CompletableOperation<PutResponse> for PutOperation {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct DeleteOperation {
     pub(crate) callback: Option<Sender<Result<DeleteResponse, OxiaError>>>,
     pub(crate) key: String,
     pub(crate) expected_version_id: Option<i64>,
+    pub(crate) partition_key: Option<String>,
 }
 
 impl ToProtobuf<DeleteRequest> for DeleteOperation {
@@ -113,6 +115,24 @@ impl ToProtobuf<DeleteRequest> for DeleteOperation {
             key: self.key.clone(),
             expected_version_id: self.expected_version_id,
         }
+    }
+}
+
+impl From<Vec<DeleteOption>> for DeleteOperation {
+    fn from(options: Vec<DeleteOption>) -> Self {
+        let mut operation = DeleteOperation::default();
+        for option in options {
+            match option {
+                DeleteOption::ExpectVersionId(expected_version_id) => {
+                    operation.expected_version_id = Some(expected_version_id)
+                }
+                DeleteOption::PartitionKey(partition_key) => {
+                    operation.partition_key = Some(partition_key)
+                }
+                DeleteOption::RecordDoesNotExist() => operation.expected_version_id = Some(-1),
+            }
+        }
+        operation
     }
 }
 

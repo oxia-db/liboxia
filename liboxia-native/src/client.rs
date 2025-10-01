@@ -44,7 +44,17 @@ pub struct PutResult {
     pub version: Version,
 }
 
-pub struct DeleteOptions {}
+pub enum DeleteOption {
+    PartitionKey(String),
+    ExpectVersionId(i64),
+    RecordDoesNotExist(),
+}
+
+impl DeleteOption {
+    pub fn none() -> Vec<DeleteOption> {
+        vec![]
+    }
+}
 
 pub struct DeleteRangeOptions {}
 
@@ -85,7 +95,7 @@ pub trait Client: Send + Sync + Clone {
         options: Vec<PutOption>,
     ) -> Result<PutResult, OxiaError>;
 
-    async fn delete(&self, key: String, options: DeleteOptions) -> Result<(), OxiaError>;
+    async fn delete(&self, key: String, options: Vec<DeleteOption>) -> Result<(), OxiaError>;
 
     async fn get(&self, key: String, options: GetOptions) -> Result<GetResult, OxiaError>;
 
@@ -168,14 +178,16 @@ impl Client for ClientImpl {
         })
     }
 
-    async fn delete(&self, key: String, options: DeleteOptions) -> Result<(), OxiaError> {
-        let batch_manager = self.get_or_init_batch_manager(Batcher::Write, &key)?;
+    async fn delete(&self, key: String, options: Vec<DeleteOption>) -> Result<(), OxiaError> {
         let (tx, rx) = oneshot::channel();
-        batch_manager.add(Operation::Delete(DeleteOperation {
-            callback: Some(tx),
-            key: key.clone(),
-            expected_version_id: None,
-        }))?;
+        let mut operation: DeleteOperation = options.into();
+        operation.callback = Some(tx);
+        operation.key = key.clone();
+        let batch_manager = match &operation.partition_key {
+            None => self.get_or_init_batch_manager(Batcher::Write, &key)?,
+            Some(partition_key) => self.get_or_init_batch_manager(Batcher::Write, partition_key)?,
+        };
+        batch_manager.add(Operation::Delete(operation))?;
         let response = rx
             .await
             .map_err(|err| UnexpectedStatus(err.to_string()))??;
