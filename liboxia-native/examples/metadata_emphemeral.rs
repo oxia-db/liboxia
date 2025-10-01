@@ -31,9 +31,6 @@ async fn main() {
     // close the client
     client.shutdown().await.unwrap();
 
-    // wait for the session expired
-    tokio::time::sleep(std::time::Duration::from_secs(16)).await;
-
     // create a new client
     client = OxiaClientBuilder::new().build().await.unwrap();
     let result = client.get(key.clone(), GetOptions {}).await;

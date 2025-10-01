@@ -1,6 +1,8 @@
 use crate::errors::OxiaError;
 use crate::errors::OxiaError::{SessionDoesNotExist, ShardLeaderNotFound, UnexpectedStatus};
-use crate::oxia::{CreateSessionRequest, SessionHeartbeat};
+use crate::oxia::{
+    CloseSessionRequest, CreateSessionRequest, SessionHeartbeat,
+};
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
 use crate::status::CODE_SESSION_NOT_FOUND;
@@ -9,10 +11,11 @@ use dashmap::DashMap;
 use log::{info, warn};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncWriteExt};
 use tokio::sync::{Mutex, OnceCell};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
-use tonic::Request;
+use tonic::{Request};
 
 struct Inner {
     shard_id: i64,
@@ -121,6 +124,28 @@ async fn start_keep_alive(
 
 impl Session {
     pub(crate) async fn shutdown(self) -> Result<(), OxiaError> {
+        let shard_manager = self.inner.shard_manager.clone();
+        let provider_manager = self.inner.provider_manager.clone();
+        if let Some(node) = shard_manager.get_leader(self.inner.shard_id) {
+            let client = provider_manager.get_provider(node.service_address).await?;
+            let mut client_guard = client.lock().await;
+            let result = client_guard
+                .close_session(Request::new(CloseSessionRequest {
+                    shard: self.inner.shard_id,
+                    session_id: self.inner.id,
+                }))
+                .await
+                .map_err(|err| UnexpectedStatus(err.to_string()));
+            if let Err(err) = result {
+                warn!(
+                    "Failed to close session. shard_id={:?} session_id={:?} error={:?}",
+                    self.inner.shard_id, self.inner.id, err
+                );
+            }
+        } else {
+            warn!("Shard leader not found. shard_id={:?}", self.inner.shard_id);
+        }
+
         self.context.cancel();
         let mut guard = self.handle.lock().await;
         if let Some(handle) = guard.take() {
