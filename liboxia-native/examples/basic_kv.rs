@@ -1,4 +1,4 @@
-use liboxia::client::{Client, DeleteRangeOptions, ListOptions, PutOption, RangeScanOptions};
+use liboxia::client::Client;
 use liboxia::client_builder::OxiaClientBuilder;
 use log::info;
 use tracing::level_filters::LevelFilter;
@@ -47,14 +47,14 @@ async fn main() {
     );
     // list keys
     let list_result = client
-        .list("".to_string(), "/".to_string(), ListOptions {})
+        .list("".to_string(), "/".to_string(), vec![])
         .await
         .unwrap();
     info!("list the keys. keys {:?}", list_result.keys);
 
     // range-scan
     let range_scan_result = client
-        .range_scan("".to_string(), "/".to_string(), RangeScanOptions {})
+        .range_scan("".to_string(), "/".to_string(), vec![])
         .await
         .unwrap();
     info!("range_scan result: {:?}", range_scan_result);
@@ -73,12 +73,12 @@ async fn main() {
 
     // delete range
     client
-        .delete_range("".to_string(), "/".to_string(), DeleteRangeOptions {})
+        .delete_range("".to_string(), "/".to_string(), vec![])
         .await
         .unwrap();
     info!("delete range keys.");
     let list_result = client
-        .list("".to_string(), "/".to_string(), ListOptions {})
+        .list("".to_string(), "/".to_string(), vec![])
         .await
         .unwrap();
     info!("list the keys. keys {:?}", list_result.keys);

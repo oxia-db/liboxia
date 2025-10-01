@@ -45,7 +45,9 @@ pub enum DeleteOption {
     RecordDoesNotExist(),
 }
 
-pub struct DeleteRangeOptions {}
+pub enum DeleteRangeOption {
+    PartitionKey(String),
+}
 
 pub enum GetOption {
     ComparisonType(KeyComparisonType),
@@ -74,21 +76,29 @@ impl Ord for GetResult {
     }
 }
 
-pub struct ListOptions {}
+pub enum ListOption {
+    PartitionKey(String),
+    UseIndex(String),
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListResult {
     pub keys: Vec<String>,
 }
 
-pub struct RangeScanOptions {}
+pub enum RangeScanOption {
+    PartitionKey(String),
+    UseIndex(String),
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RangeScanResult {
     pub records: Vec<GetResult>,
 }
 
-pub struct GetSequenceUpdatesOptions {}
+pub enum GetSequenceUpdatesOption {
+    PartitionKey(String),
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Notification {}
@@ -110,28 +120,28 @@ pub trait Client: Send + Sync + Clone {
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
-        options: ListOptions,
+        options: Vec<ListOption>,
     ) -> Result<ListResult, OxiaError>;
 
     async fn range_scan(
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
-        options: RangeScanOptions,
+        options: Vec<RangeScanOption>,
     ) -> Result<RangeScanResult, OxiaError>;
 
     async fn delete_range(
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
-        options: DeleteRangeOptions,
+        options: Vec<DeleteRangeOption>,
     ) -> Result<(), OxiaError>;
 
     async fn get_notifications(&self) -> Result<UnboundedReceiver<Notification>, OxiaError>;
     async fn get_sequence_updates(
         &self,
         key: String,
-        options: GetSequenceUpdatesOptions,
+        options: Vec<GetSequenceUpdatesOption>,
     ) -> Result<UnboundedReceiver<String>, OxiaError>;
 
     async fn shutdown(self) -> Result<(), OxiaError>;
@@ -244,7 +254,7 @@ impl Client for ClientImpl {
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
-        options: ListOptions,
+        options: Vec<ListOption>,
     ) -> Result<ListResult, OxiaError> {
         let mut join_set = JoinSet::new();
         for (shard, leader) in self.inner.shard_manager.get_shards_leader() {
@@ -286,6 +296,7 @@ impl Client for ClientImpl {
             let mut keys = result?;
             output_keys.append(&mut keys);
         }
+        output_keys.sort_by(|left, right| key::compare(left, right));
         Ok(ListResult { keys: output_keys })
     }
 
@@ -293,7 +304,7 @@ impl Client for ClientImpl {
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
-        options: RangeScanOptions,
+        options: Vec<RangeScanOption>,
     ) -> Result<RangeScanResult, OxiaError> {
         let mut join_set = JoinSet::new();
         for (shard, leader) in self.inner.shard_manager.get_shards_leader() {
@@ -350,7 +361,7 @@ impl Client for ClientImpl {
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
-        options: DeleteRangeOptions,
+        options: Vec<DeleteRangeOption>,
     ) -> Result<(), OxiaError> {
         let mut join_set = JoinSet::new();
         for (shard, _) in self.inner.shard_manager.get_shards_leader() {
@@ -385,7 +396,7 @@ impl Client for ClientImpl {
     async fn get_sequence_updates(
         &self,
         key: String,
-        options: GetSequenceUpdatesOptions,
+        options: Vec<GetSequenceUpdatesOption>,
     ) -> Result<UnboundedReceiver<String>, OxiaError> {
         todo!()
     }
