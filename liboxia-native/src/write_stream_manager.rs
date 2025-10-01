@@ -1,12 +1,15 @@
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::InternalRetryable;
+use crate::errors::OxiaError::{InternalRetryable, UnexpectedStatus};
 use crate::oxia::{WriteRequest, WriteResponse};
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
 use crate::write_stream::WriteStream;
 use dashmap::DashMap;
+use futures::task::SpawnExt;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, OnceCell};
+use tokio::task::JoinSet;
 use tonic::codegen::tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::Request;
 
@@ -18,7 +21,7 @@ pub struct WriteStreamManager {
     shard_manager: Arc<ShardManager>,
     provider_manager: Arc<ProviderManager>,
 
-    streams: Arc<DashMap<i64, OnceCell<WriteStream>>>,
+    streams: DashMap<i64, OnceCell<WriteStream>>,
 }
 
 impl WriteStreamManager {
@@ -90,6 +93,26 @@ impl WriteStreamManager {
         w_stream.get_defer_response().await.unwrap()
     }
 
+    pub async fn shutdown(self) -> Result<(), OxiaError> {
+        let streams = self.streams;
+
+        let mut joiner = JoinSet::new();
+        for (_, stream_cell) in streams.into_iter() {
+            if let Some(stream) = stream_cell.into_inner() {
+                joiner.spawn(stream.shutdown());
+            }
+        }
+        while let Some(result) = joiner.join_next().await {
+            result.map_err(|err| {
+                UnexpectedStatus(format!(
+                    "write stream nanager background task failed to join: {}",
+                    err
+                ))
+            })??;
+        }
+        Ok(())
+    }
+
     pub fn new(
         namespace: String,
         shard_manager: Arc<ShardManager>,
@@ -99,7 +122,7 @@ impl WriteStreamManager {
             namespace,
             shard_manager,
             provider_manager,
-            streams: Arc::new(DashMap::new()),
+            streams: DashMap::new(),
         }
     }
 }

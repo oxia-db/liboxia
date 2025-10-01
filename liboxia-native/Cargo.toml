@@ -14,6 +14,7 @@ xxhash-rust = { workspace = true }
 uuid = { workspace = true }
 tokio-util = { workspace = true }
 log = { workspace = true }
+futures = {workspace = true}
 
 [dev-dependencies]
 tracing = { workspace = true }

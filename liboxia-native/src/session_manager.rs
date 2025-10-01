@@ -9,8 +9,8 @@ use dashmap::DashMap;
 use log::{info, warn};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::OnceCell;
-use tokio::task::JoinHandle;
+use tokio::sync::{Mutex, OnceCell};
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tonic::Request;
 
@@ -20,10 +20,11 @@ struct Inner {
     shard_manager: Arc<ShardManager>,
     provider_manager: Arc<ProviderManager>,
 }
+
 struct Session {
     context: CancellationToken,
+    handle: Mutex<Option<JoinHandle<()>>>,
     inner: Arc<Inner>,
-    handle: JoinHandle<()>,
 }
 
 impl Session {
@@ -34,13 +35,13 @@ impl Session {
         provider_manager: Arc<ProviderManager>,
     ) -> Self {
         let context = CancellationToken::new();
-        let handle = tokio::spawn(start_keep_alive(
+        let handle = Mutex::new(Some(tokio::spawn(start_keep_alive(
             context.clone(),
             shard_manager.clone(),
             provider_manager.clone(),
             shard_id,
             session_id,
-        ));
+        ))));
         let session = Self {
             handle,
             context,
@@ -118,7 +119,18 @@ async fn start_keep_alive(
     .await;
 }
 
-impl Session {}
+impl Session {
+    pub(crate) async fn shutdown(self) -> Result<(), OxiaError> {
+        self.context.cancel();
+        let mut guard = self.handle.lock().await;
+        if let Some(handle) = guard.take() {
+            handle
+                .await
+                .map_err(|err| UnexpectedStatus(err.to_string()))?
+        }
+        Ok(())
+    }
+}
 
 pub(crate) struct SessionManager {
     identity: String,
@@ -154,7 +166,10 @@ impl SessionManager {
                 match self.shard_manager.get_leader(shard_id) {
                     None => Err(ShardLeaderNotFound(shard_id)),
                     Some(node) => {
-                        let client = self.provider_manager.get_provider(node.service_address).await?;
+                        let client = self
+                            .provider_manager
+                            .get_provider(node.service_address)
+                            .await?;
                         let mut client_guard = client.lock().await;
                         let response = client_guard
                             .create_session(Request::new(CreateSessionRequest {
@@ -176,5 +191,20 @@ impl SessionManager {
             })
             .await?;
         Ok(session.inner.id)
+    }
+
+    pub(crate) async fn shutdown(self) -> Result<(), OxiaError> {
+        let mut joiner = JoinSet::new();
+        for (_, session_cell) in self.sessions.into_iter() {
+            if let Some(session) = session_cell.into_inner() {
+                joiner.spawn(session.shutdown());
+            }
+        }
+        while let Some(result) = joiner.join_next().await {
+            result.map_err(|err| {
+                UnexpectedStatus(format!("Session task failed to join: {}", err))
+            })??;
+        }
+        Ok(())
     }
 }

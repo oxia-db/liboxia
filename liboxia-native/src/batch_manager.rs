@@ -8,8 +8,8 @@ use crate::write_stream_manager::WriteStreamManager;
 use log::info;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
@@ -35,10 +35,17 @@ impl Batcher {
     }
 }
 
+#[derive(Clone)]
 pub struct BatchManager {
     context: CancellationToken,
     tx: UnboundedSender<Operation>,
-    batch_handle: JoinHandle<()>,
+    batch_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+impl Drop for BatchManager {
+    fn drop(&mut self) {
+        self.context.cancel();
+    }
 }
 
 impl BatchManager {
@@ -67,7 +74,7 @@ impl BatchManager {
         BatchManager {
             context,
             tx,
-            batch_handle: handle,
+            batch_handle: Arc::new(Mutex::new(Some(handle))),
         }
     }
 
@@ -80,9 +87,12 @@ impl BatchManager {
 
     pub async fn shutdown(self) -> Result<(), OxiaError> {
         self.context.cancel();
-        self.batch_handle
-            .await
-            .map_err(|err| UnexpectedStatus(err.to_string()))?;
+        let mut handle_guard = self.batch_handle.lock().await;
+        if let Some(handle) = handle_guard.take() {
+            handle
+                .await
+                .map_err(|err| UnexpectedStatus(err.to_string()))?;
+        }
         Ok(())
     }
 }

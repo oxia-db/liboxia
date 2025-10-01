@@ -7,9 +7,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::Receiver;
 use tokio::sync::{oneshot, Mutex};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::codegen::tokio_stream::StreamExt;
-use tonic::{Streaming};
+use tonic::Streaming;
 
 pub(crate) struct Inflight {
     pub(crate) future: oneshot::Sender<WriteResponse>,
@@ -31,6 +32,13 @@ pub(crate) struct WriteStream {
     context: CancellationToken,
     inner: Arc<Mutex<Inner>>,
     defer_response: Mutex<Option<Receiver<WriteResponse>>>,
+    handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for WriteStream {
+    fn drop(&mut self) {
+        self.context.cancel();
+    }
 }
 
 impl WriteStream {
@@ -101,6 +109,7 @@ impl WriteStream {
             context,
             inner,
             defer_response: Mutex::new(None),
+            handle: Mutex::new(None),
         }
     }
 
@@ -111,11 +120,16 @@ impl WriteStream {
             streaming,
         ));
     }
-}
 
-impl Drop for WriteStream {
-    fn drop(&mut self) {
+    pub async fn shutdown(self) -> Result<(), OxiaError> {
         self.context.cancel();
+        let mut guard = self.handle.lock().await;
+        if let Some(handle) = guard.take() {
+            handle
+                .await
+                .map_err(|err| UnexpectedStatus(err.to_string()))?
+        }
+        Ok(())
     }
 }
 

@@ -9,33 +9,37 @@ use dashmap::DashMap;
 use log::{info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::codegen::tokio_stream::StreamExt;
 use tonic::Status;
-
-pub(crate) struct Node {
-    pub service_address: String,
-}
 
 pub struct ShardManagerOptions {
     pub address: String,
     pub namespace: String,
     pub provider_manager: Arc<ProviderManager>,
 }
-
-pub struct ShardManager {
-    namespace: String,
-    inner: Arc<Inner>,
-
-    context: CancellationToken,
-    assignment_handle: JoinHandle<()>,
+pub(crate) struct Node {
+    pub service_address: String,
 }
 
 struct Inner {
     provider_manager: Arc<ProviderManager>,
     current_assignments: Arc<DashMap<i64, ShardAssignment>>,
+}
+
+pub struct ShardManager {
+    namespace: String,
+    inner: Arc<Inner>,
+    context: CancellationToken,
+    assignment_handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for ShardManager {
+    fn drop(&mut self) {
+        self.context.cancel();
+    }
 }
 
 async fn start_assignments_listener(
@@ -130,16 +134,19 @@ impl ShardManager {
             namespace: options.namespace,
             inner,
             context,
-            assignment_handle,
+            assignment_handle: Mutex::new(Some(assignment_handle)),
         };
         Ok(sm)
     }
 
     pub async fn shutdown(self) -> Result<(), OxiaError> {
         self.context.cancel();
-        self.assignment_handle
-            .await
-            .map_err(|err| UnexpectedStatus(err.to_string()))?;
+        let mut handle_guard = self.assignment_handle.lock().await;
+        if let Some(handle) = handle_guard.take() {
+            handle
+                .await
+                .map_err(|err| UnexpectedStatus(err.to_string()))?;
+        }
         Ok(())
     }
 

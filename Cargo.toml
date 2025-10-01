@@ -20,3 +20,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tonic-build = "0.13.1"
 liboxia = { path = "liboxia-native" }
 libc = "0.2"
+futures = "0.3"

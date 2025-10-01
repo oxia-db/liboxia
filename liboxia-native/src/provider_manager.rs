@@ -1,7 +1,6 @@
 use crate::errors::OxiaError;
 use crate::errors::OxiaError::UnexpectedStatus;
 use crate::oxia::oxia_client_client::OxiaClientClient;
-use dashmap::mapref::one::RefMut;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell};
@@ -36,5 +35,10 @@ impl ProviderManager {
         ProviderManager {
             providers: Arc::new(DashMap::new()),
         }
+    }
+
+    pub async fn shutdown(self) -> Result<(), OxiaError> {
+        self.providers.clear();
+        Ok(())
     }
 }

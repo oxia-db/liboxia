@@ -17,6 +17,7 @@ use crate::write_stream_manager::WriteStreamManager;
 use dashmap::mapref::one::RefMut;
 use dashmap::DashMap;
 use std::sync::Arc;
+use tokio::io::{join, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
@@ -125,8 +126,8 @@ pub(crate) struct Inner {
     pub(crate) shard_manager: Arc<ShardManager>,
     pub(crate) session_manager: Arc<SessionManager>,
     pub(crate) write_stream_manager: Arc<WriteStreamManager>,
-    pub(crate) write_batch_manager: DashMap<i64, Arc<BatchManager>>,
-    pub(crate) read_batch_manager: DashMap<i64, Arc<BatchManager>>,
+    pub(crate) write_batch_manager: DashMap<i64, BatchManager>,
+    pub(crate) read_batch_manager: DashMap<i64, BatchManager>,
 }
 
 #[derive(Clone)]
@@ -354,6 +355,76 @@ impl Client for ClientImpl {
     }
 
     async fn shutdown(self) -> Result<(), OxiaError> {
+        let inner = match Arc::try_unwrap(self.inner) {
+            Ok(inner) => inner,
+            Err(arc) => {
+                return Err(UnexpectedStatus(format!(
+                    "Cannot shutdown inner: {} other references exist",
+                    Arc::strong_count(&arc)
+                )))
+            }
+        };
+
+        let mut joiner = JoinSet::new();
+        for (_, wb) in inner.write_batch_manager.into_iter() {
+            joiner.spawn(async move { wb.shutdown().await });
+        }
+        for (_, rb) in inner.read_batch_manager.into_iter() {
+            joiner.spawn(async move { rb.shutdown().await });
+        }
+        while let Some(result) = joiner.join_next().await {
+            result.map_err(|err| {
+                UnexpectedStatus(format!("batcher task failed to join: {}", err))
+            })??;
+        }
+
+        match Arc::try_unwrap(inner.write_stream_manager) {
+            Ok(wsm) => wsm,
+            Err(arc) => {
+                return Err(UnexpectedStatus(format!(
+                    "Cannot shutdown write stream manager: {} other references exist",
+                    Arc::strong_count(&arc)
+                )))
+            }
+        }
+        .shutdown()
+        .await?;
+
+        match Arc::try_unwrap(inner.session_manager) {
+            Ok(sm) => sm,
+            Err(arc) => {
+                return Err(UnexpectedStatus(format!(
+                    "Cannot shutdown session manager: {} other references exist",
+                    Arc::strong_count(&arc)
+                )));
+            }
+        }
+        .shutdown()
+        .await?;
+
+        match Arc::try_unwrap(inner.shard_manager) {
+            Ok(sm) => sm,
+            Err(arc) => {
+                return Err(UnexpectedStatus(format!(
+                    "Cannot shutdown shard manager: {} other references exist",
+                    Arc::strong_count(&arc)
+                )));
+            }
+        }
+        .shutdown()
+        .await?;
+
+        match Arc::try_unwrap(inner.provider_manager) {
+            Ok(pm) => pm,
+            Err(arc) => {
+                return Err(UnexpectedStatus(format!(
+                    "Cannot shutdown provider manager: {} other references exist",
+                    Arc::strong_count(&arc)
+                )))
+            }
+        }
+        .shutdown()
+        .await?;
         Ok(())
     }
 }
@@ -397,7 +468,7 @@ impl ClientImpl {
         &'_ self,
         batcher: Batcher,
         key: &str,
-    ) -> Result<RefMut<'_, i64, Arc<BatchManager>>, OxiaError> {
+    ) -> Result<RefMut<'_, i64, BatchManager>, OxiaError> {
         match self.inner.shard_manager.get_shard(&key) {
             Some(shard_id) => self.get_or_init_batch_manager_with_shard(batcher, shard_id),
             None => Err(KeyLeaderNotFound(key.to_string())),
@@ -408,9 +479,9 @@ impl ClientImpl {
         &self,
         batcher: Batcher,
         shard_id: i64,
-    ) -> Result<RefMut<'_, i64, Arc<BatchManager>>, OxiaError> {
+    ) -> Result<RefMut<'_, i64, BatchManager>, OxiaError> {
         let closure = || {
-            Arc::new(BatchManager::new(
+            BatchManager::new(
                 shard_id,
                 batcher.clone(),
                 self.inner.shard_manager.clone(),
@@ -418,7 +489,7 @@ impl ClientImpl {
                 self.inner.write_stream_manager.clone(),
                 self.inner.options.batch_linger.clone(),
                 self.inner.options.batch_max_size.clone(),
-            ))
+            )
         };
         Ok(match batcher {
             Batcher::Read => self
