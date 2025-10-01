@@ -4,6 +4,7 @@ use crate::errors::OxiaError;
 use crate::errors::OxiaError::{
     KeyLeaderNotFound, KeyNotFound, SessionDoesNotExist, UnexpectedStatus, UnexpectedVersionId,
 };
+use crate::key;
 use crate::operations::{
     DeleteOperation, DeleteRangeOperation, GetOperation, Operation, PutOperation,
 };
@@ -14,10 +15,10 @@ use crate::provider_manager::ProviderManager;
 use crate::session_manager::SessionManager;
 use crate::shard_manager::{ShardManager, ShardManagerOptions};
 use crate::write_stream_manager::WriteStreamManager;
-use dashmap::mapref::one::RefMut;
 use dashmap::DashMap;
+use std::cmp::Ordering;
 use std::sync::Arc;
-use tokio::io::{join, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
@@ -32,12 +33,6 @@ pub enum PutOption {
     Ephemeral(),
 }
 
-impl PutOption {
-    pub fn none() -> Vec<PutOption> {
-        vec![]
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct PutResult {
     pub key: String,
@@ -50,21 +45,33 @@ pub enum DeleteOption {
     RecordDoesNotExist(),
 }
 
-impl DeleteOption {
-    pub fn none() -> Vec<DeleteOption> {
-        vec![]
-    }
-}
-
 pub struct DeleteRangeOptions {}
 
-pub struct GetOptions {}
+pub enum GetOption {
+    ComparisonType(KeyComparisonType),
+    PartitionKey(String),
+    IncludeValue(),
+    UseIndex(String),
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct GetResult {
     pub key: String,
     pub value: Option<Vec<u8>>,
     pub version: Version,
+}
+impl Eq for GetResult {}
+
+impl PartialOrd for GetResult {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for GetResult {
+    fn cmp(&self, other: &Self) -> Ordering {
+        key::compare(&self.key, &other.key)
+    }
 }
 
 pub struct ListOptions {}
@@ -97,7 +104,7 @@ pub trait Client: Send + Sync + Clone {
 
     async fn delete(&self, key: String, options: Vec<DeleteOption>) -> Result<(), OxiaError>;
 
-    async fn get(&self, key: String, options: GetOptions) -> Result<GetResult, OxiaError>;
+    async fn get(&self, key: String, options: Vec<GetOption>) -> Result<GetResult, OxiaError>;
 
     async fn list(
         &self,
@@ -136,8 +143,8 @@ pub(crate) struct Inner {
     pub(crate) shard_manager: Arc<ShardManager>,
     pub(crate) session_manager: Arc<SessionManager>,
     pub(crate) write_stream_manager: Arc<WriteStreamManager>,
-    pub(crate) write_batch_manager: DashMap<i64, BatchManager>,
-    pub(crate) read_batch_manager: DashMap<i64, BatchManager>,
+    pub(crate) write_batch_manager: DashMap<i64, Arc<BatchManager>>,
+    pub(crate) read_batch_manager: DashMap<i64, Arc<BatchManager>>,
 }
 
 #[derive(Clone)]
@@ -159,11 +166,10 @@ impl Client for ClientImpl {
         operation.key = key.clone();
         operation.value = value.clone();
         operation.client_identity = Some(self.inner.options.identity.clone());
-        let batch_manager = match &operation.partition_key {
+        let (shard_id, batch_manager) = match &operation.partition_key {
             None => self.get_or_init_batch_manager(Batcher::Write, &key)?,
             Some(partition_key) => self.get_or_init_batch_manager(Batcher::Write, partition_key)?,
         };
-        let shard_id = batch_manager.key().clone();
         if operation.ephemeral {
             operation.session_id = Some(self.inner.session_manager.get_session_id(shard_id).await?)
         }
@@ -183,7 +189,7 @@ impl Client for ClientImpl {
         let mut operation: DeleteOperation = options.into();
         operation.callback = Some(tx);
         operation.key = key.clone();
-        let batch_manager = match &operation.partition_key {
+        let (_, batch_manager) = match &operation.partition_key {
             None => self.get_or_init_batch_manager(Batcher::Write, &key)?,
             Some(partition_key) => self.get_or_init_batch_manager(Batcher::Write, partition_key)?,
         };
@@ -195,25 +201,43 @@ impl Client for ClientImpl {
         Ok(check_status(response.status)?)
     }
 
-    async fn get(&self, key: String, options: GetOptions) -> Result<GetResult, OxiaError> {
-        let batch_manager = self.get_or_init_batch_manager(Batcher::Read, &key)?;
-        let (tx, rx) = oneshot::channel();
-        batch_manager.add(Operation::Get(GetOperation {
-            callback: Some(tx),
-            key: key.clone(),
-            include_value: true,
-            comparison_type: KeyComparisonType::Equal,
-            secondary_index_name: None,
-        }))?;
-        let get_response = rx
-            .await
-            .map_err(|err| UnexpectedStatus(err.to_string()))??;
-        check_status(get_response.status)?;
-        Ok(GetResult {
-            key: get_response.key.or(Some(key.clone())).unwrap(),
-            value: get_response.value,
-            version: get_response.version.unwrap(),
-        })
+    async fn get(&self, key: String, options: Vec<GetOption>) -> Result<GetResult, OxiaError> {
+        let mut operation: GetOperation = options.into();
+        operation.key = key.clone();
+        if operation.partition_key.is_some() {
+            let (_, batch_manager) = match &operation.partition_key {
+                None => self.get_or_init_batch_manager(Batcher::Read, &key)?,
+                Some(partition_key) => {
+                    self.get_or_init_batch_manager(Batcher::Read, partition_key)?
+                }
+            }
+            .clone();
+            get_from_single_shard(operation.clone(), batch_manager).await
+        } else {
+            let mut join_set = JoinSet::new();
+            for (shard, leader) in self.inner.shard_manager.get_shards_leader() {
+                let (_, batch_manager) = self
+                    .get_or_init_batch_manager_with_shard(Batcher::Read, shard)?
+                    .clone();
+                join_set.spawn(get_from_single_shard(
+                    operation.clone(),
+                    batch_manager.clone(),
+                ));
+            }
+            let mut results = join_set
+                .join_all()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<GetResult>, OxiaError>>()?;
+            results.sort();
+            let index = match operation.comparison_type {
+                KeyComparisonType::Equal
+                | KeyComparisonType::Ceiling
+                | KeyComparisonType::Higher => 0,
+                KeyComparisonType::Floor | KeyComparisonType::Lower => results.len() - 1,
+            };
+            Ok(results.swap_remove(index))
+        }
     }
 
     async fn list(
@@ -329,10 +353,10 @@ impl Client for ClientImpl {
         options: DeleteRangeOptions,
     ) -> Result<(), OxiaError> {
         let mut join_set = JoinSet::new();
-        for (shard, leader) in self.inner.shard_manager.get_shards_leader() {
+        for (shard, _) in self.inner.shard_manager.get_shards_leader() {
             let min_key_inclusive_clone = min_key_inclusive.clone();
             let max_key_exclusive_clone = max_key_exclusive.clone();
-            let batch_manager = self
+            let (_, batch_manager) = self
                 .get_or_init_batch_manager_with_shard(Batcher::Write, shard)?
                 .clone();
             join_set.spawn(async move {
@@ -379,10 +403,28 @@ impl Client for ClientImpl {
 
         let mut joiner = JoinSet::new();
         for (_, wb) in inner.write_batch_manager.into_iter() {
-            joiner.spawn(async move { wb.shutdown().await });
+            let manager = match Arc::try_unwrap(wb) {
+                Ok(inner) => inner,
+                Err(arc) => {
+                    return Err(UnexpectedStatus(format!(
+                        "Cannot shutdown write batch manager: {} other references exist",
+                        Arc::strong_count(&arc)
+                    )))
+                }
+            };
+            joiner.spawn(async move { manager.shutdown().await });
         }
         for (_, rb) in inner.read_batch_manager.into_iter() {
-            joiner.spawn(async move { rb.shutdown().await });
+            let manager = match Arc::try_unwrap(rb) {
+                Ok(inner) => inner,
+                Err(arc) => {
+                    return Err(UnexpectedStatus(format!(
+                        "Cannot shutdown read batch manager: {} other references exist",
+                        Arc::strong_count(&arc)
+                    )))
+                }
+            };
+            joiner.spawn(async move { manager.shutdown().await });
         }
         while let Some(result) = joiner.join_next().await {
             result.map_err(|err| {
@@ -477,10 +519,10 @@ impl ClientImpl {
     }
 
     fn get_or_init_batch_manager(
-        &'_ self,
+        &self,
         batcher: Batcher,
         key: &str,
-    ) -> Result<RefMut<'_, i64, BatchManager>, OxiaError> {
+    ) -> Result<(i64, Arc<BatchManager>), OxiaError> {
         match self.inner.shard_manager.get_shard(&key) {
             Some(shard_id) => self.get_or_init_batch_manager_with_shard(batcher, shard_id),
             None => Err(KeyLeaderNotFound(key.to_string())),
@@ -491,9 +533,9 @@ impl ClientImpl {
         &self,
         batcher: Batcher,
         shard_id: i64,
-    ) -> Result<RefMut<'_, i64, BatchManager>, OxiaError> {
+    ) -> Result<(i64, Arc<BatchManager>), OxiaError> {
         let closure = || {
-            BatchManager::new(
+            Arc::new(BatchManager::new(
                 shard_id,
                 batcher.clone(),
                 self.inner.shard_manager.clone(),
@@ -501,9 +543,9 @@ impl ClientImpl {
                 self.inner.write_stream_manager.clone(),
                 self.inner.options.batch_linger.clone(),
                 self.inner.options.batch_max_size.clone(),
-            )
+            ))
         };
-        Ok(match batcher {
+        let ref_mut = match batcher {
             Batcher::Read => self
                 .inner
                 .read_batch_manager
@@ -514,8 +556,29 @@ impl ClientImpl {
                 .write_batch_manager
                 .entry(shard_id)
                 .or_insert_with(closure),
-        })
+        };
+        Ok((ref_mut.key().clone(), ref_mut.value().clone()))
     }
+}
+
+#[inline]
+async fn get_from_single_shard(
+    mut operation: GetOperation,
+    batch_manager: Arc<BatchManager>,
+) -> Result<GetResult, OxiaError> {
+    let extra_key = operation.key.clone();
+    let (tx, rx) = oneshot::channel();
+    operation.callback = Some(tx);
+    batch_manager.add(Operation::Get(operation))?;
+    let get_response = rx
+        .await
+        .map_err(|err| UnexpectedStatus(err.to_string()))??;
+    check_status(get_response.status)?;
+    Ok(GetResult {
+        key: get_response.key.or(Some(extra_key)).unwrap(),
+        value: get_response.value,
+        version: get_response.version.unwrap(),
+    })
 }
 
 fn check_status(status: i32) -> Result<(), OxiaError> {

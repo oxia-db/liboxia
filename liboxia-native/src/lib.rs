@@ -12,6 +12,7 @@ mod batch_manager;
 mod address;
 mod session_manager;
 mod status;
+mod key;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 pub mod oxia {

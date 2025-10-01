@@ -35,7 +35,6 @@ impl Batcher {
     }
 }
 
-#[derive(Clone)]
 pub struct BatchManager {
     context: CancellationToken,
     tx: UnboundedSender<Operation>,

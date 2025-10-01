@@ -1,5 +1,5 @@
+use liboxia::client::Client;
 use liboxia::client::PutOption;
-use liboxia::client::{Client, GetOptions};
 use liboxia::client_builder::OxiaClientBuilder;
 use log::info;
 use tracing::level_filters::LevelFilter;
@@ -33,7 +33,7 @@ async fn main() {
 
     // create a new client
     client = OxiaClientBuilder::new().build().await.unwrap();
-    let result = client.get(key.clone(), GetOptions {}).await;
+    let result = client.get(key.clone(), vec![]).await;
     info!("get the value again. error: {:?}", result.unwrap_err());
 
     client.shutdown().await.unwrap();

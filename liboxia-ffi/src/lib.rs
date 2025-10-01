@@ -3,7 +3,7 @@ use std::slice;
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;
 
-use liboxia::client::{Client, ClientImpl, GetOptions, PutOption};
+use liboxia::client::{Client, ClientImpl};
 use liboxia::client_options::OxiaClientOptions;
 use liboxia::errors::OxiaError;
 
@@ -141,7 +141,7 @@ pub extern "C" fn oxia_client_put(
     let value = unsafe { slice::from_raw_parts(value, value_len).to_vec() };
     let result = rt.block_on(async {
         let rust_client = unsafe { &*client };
-        rust_client.0.put(key, value, PutOption::none()).await
+        rust_client.0.put(key, value, vec![]).await
     });
 
     match result {
@@ -170,7 +170,7 @@ pub extern "C" fn oxia_client_get(
     let key = unsafe { CStr::from_ptr(key).to_str().unwrap().to_string() };
     let result = rt.block_on(async {
         let rust_client = unsafe { &*client };
-        rust_client.0.get(key, GetOptions {}).await
+        rust_client.0.get(key, vec![]).await
     });
 
     match result {

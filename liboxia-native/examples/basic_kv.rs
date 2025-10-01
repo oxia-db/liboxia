@@ -1,7 +1,4 @@
-use liboxia::client::DeleteOption;
-use liboxia::client::{
-    Client, DeleteRangeOptions, GetOptions, ListOptions, PutOption, RangeScanOptions,
-};
+use liboxia::client::{Client, DeleteRangeOptions, ListOptions, PutOption, RangeScanOptions};
 use liboxia::client_builder::OxiaClientBuilder;
 use log::info;
 use tracing::level_filters::LevelFilter;
@@ -23,7 +20,7 @@ async fn main() {
     let payload = "payload".to_string().into_bytes();
     // put key - 1
     let put_result = client
-        .put(key1.clone(), payload.clone(), PutOption::none())
+        .put(key1.clone(), payload.clone(), vec![])
         .await
         .unwrap();
     info!(
@@ -32,7 +29,7 @@ async fn main() {
     );
     // put key - 2
     let put_result = client
-        .put(key2.clone(), payload.clone(), PutOption::none())
+        .put(key2.clone(), payload.clone(), vec![])
         .await
         .unwrap();
     info!(
@@ -41,7 +38,7 @@ async fn main() {
     );
     // put key - 3
     let put_result = client
-        .put(key3.clone(), payload.clone(), PutOption::none())
+        .put(key3.clone(), payload.clone(), vec![])
         .await
         .unwrap();
     info!(
@@ -63,18 +60,15 @@ async fn main() {
     info!("range_scan result: {:?}", range_scan_result);
 
     // get key-1
-    let get_result = client.get(key1.clone(), GetOptions {}).await.unwrap();
+    let get_result = client.get(key1.clone(), vec![]).await.unwrap();
     info!(
         "get the value. key {:?} value {:?} version {:?}",
         get_result.key, get_result.value, get_result.version
     );
     // delete key-1
-    client
-        .delete(key1.clone(), DeleteOption::none())
-        .await
-        .unwrap();
+    client.delete(key1.clone(), vec![]).await.unwrap();
     info!("deleted the key-1. key {:?} ", key1.clone());
-    let result = client.get(key1.clone(), GetOptions {}).await;
+    let result = client.get(key1.clone(), vec![]).await;
     info!("get the value again. error: {:?}", result.unwrap_err());
 
     // delete range

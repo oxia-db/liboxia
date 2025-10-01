@@ -1,4 +1,4 @@
-use crate::client::{DeleteOption, PutOption};
+use crate::client::{DeleteOption, GetOption, PutOption};
 use crate::errors::OxiaError;
 use crate::oxia::{
     DeleteRangeRequest, DeleteRangeResponse, DeleteRequest, DeleteResponse, GetRequest,
@@ -207,12 +207,27 @@ impl CompletableOperation<DeleteRangeResponse> for DeleteRangeOperation {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct GetOperation {
     pub(crate) callback: Option<Sender<Result<GetResponse, OxiaError>>>,
+    pub(crate) partition_key: Option<String>,
     pub(crate) key: String,
     pub(crate) include_value: bool,
     pub(crate) comparison_type: KeyComparisonType,
     pub(crate) secondary_index_name: Option<String>,
+}
+
+impl Clone for GetOperation {
+    fn clone(&self) -> Self {
+        GetOperation {
+            callback: None,
+            partition_key: self.partition_key.clone(),
+            key: self.key.clone(),
+            include_value: self.include_value,
+            comparison_type: self.comparison_type.clone(),
+            secondary_index_name: self.secondary_index_name.clone(),
+        }
+    }
 }
 
 impl CompletableOperation<GetResponse> for GetOperation {
@@ -240,6 +255,29 @@ impl CompletableOperation<GetResponse> for GetOperation {
                 warn!("complete callback twice, ignoring")
             }
         }
+    }
+}
+
+impl From<Vec<GetOption>> for GetOperation {
+    fn from(options: Vec<GetOption>) -> Self {
+        let mut operation = GetOperation::default();
+        for option in options {
+            match option {
+                GetOption::PartitionKey(partition_key) => {
+                    operation.partition_key = Some(partition_key)
+                }
+                GetOption::ComparisonType(comparison_type) => {
+                    operation.comparison_type = comparison_type
+                }
+                GetOption::IncludeValue() => {
+                    operation.include_value = true;
+                }
+                GetOption::UseIndex(index) => {
+                    operation.secondary_index_name = Some(index);
+                }
+            }
+        }
+        operation
     }
 }
 
