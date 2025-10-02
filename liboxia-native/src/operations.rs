@@ -1,4 +1,4 @@
-use crate::client::{DeleteOption, DeleteRangeOption, GetOption, PutOption};
+use crate::client::{DeleteOption, DeleteRangeOption, GetOption, ListOption, PutOption};
 use crate::errors::OxiaError;
 use crate::oxia::{
     DeleteRangeRequest, DeleteRangeResponse, DeleteRequest, DeleteResponse, GetRequest,
@@ -320,13 +320,26 @@ impl ToProtobuf<GetRequest> for GetOperation {
 }
 
 #[derive(Default)]
-struct ListOperation {
+pub(crate) struct ListOperation {
     pub(crate) callback: Option<Sender<Result<Vec<String>, OxiaError>>>,
     pub(crate) shard_id: i64,
     pub(crate) min_key_inclusive: String,
     pub(crate) max_key_exclusive: String,
     pub(crate) partition_key: Option<String>,
     pub(crate) secondary_index_name: Option<String>,
+}
+
+impl Clone for ListOperation {
+    fn clone(&self) -> Self {
+        ListOperation {
+            callback: None,
+            shard_id: self.shard_id,
+            min_key_inclusive: self.min_key_inclusive.clone(),
+            max_key_exclusive: self.max_key_exclusive.clone(),
+            partition_key: self.partition_key.clone(),
+            secondary_index_name: self.secondary_index_name.clone(),
+        }
+    }
 }
 
 impl ToProtobuf<ListRequest> for ListOperation {
@@ -340,8 +353,25 @@ impl ToProtobuf<ListRequest> for ListOperation {
     }
 }
 
+impl From<Vec<ListOption>> for ListOperation {
+    fn from(options: Vec<ListOption>) -> Self {
+        let mut operation = ListOperation::default();
+        for option in options {
+            match option {
+                ListOption::PartitionKey(partition_key) => {
+                    operation.partition_key = Some(partition_key)
+                }
+                ListOption::UseIndex(index) => {
+                    operation.secondary_index_name = Some(index);
+                }
+            }
+        }
+        operation
+    }
+}
+
 #[derive(Default)]
-struct RangeScanOperation {
+pub(crate) struct RangeScanOperation {
     pub(crate) callback: Option<Sender<Result<Vec<GetResponse>, OxiaError>>>,
     pub(crate) shard_id: i64,
     pub(crate) min_key_inclusive: String,

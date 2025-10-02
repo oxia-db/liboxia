@@ -6,14 +6,13 @@ use crate::errors::OxiaError::{
 };
 use crate::key;
 use crate::operations::{
-    DeleteOperation, DeleteRangeOperation, GetOperation, Operation, PutOperation,
+    DeleteOperation, DeleteRangeOperation, GetOperation, ListOperation, Operation, PutOperation,
+    ToProtobuf,
 };
-use crate::oxia::{
-    KeyComparisonType, ListRequest, RangeScanRequest, SecondaryIndex, Status, Version,
-};
+use crate::oxia::{KeyComparisonType, RangeScanRequest, SecondaryIndex, Status, Version};
 use crate::provider_manager::ProviderManager;
 use crate::session_manager::SessionManager;
-use crate::shard_manager::{ShardManager, ShardManagerOptions};
+use crate::shard_manager::{Node, ShardManager, ShardManagerOptions};
 use crate::write_stream_manager::WriteStreamManager;
 use dashmap::DashMap;
 use std::cmp::Ordering;
@@ -285,45 +284,38 @@ impl Client for ClientImpl {
         max_key_exclusive: String,
         options: Vec<ListOption>,
     ) -> Result<ListResult, OxiaError> {
-        let mut join_set = JoinSet::new();
-        for (shard, leader) in self.inner.shard_manager.get_shards_leader() {
-            let provider_manager = self.inner.provider_manager.clone();
-            let min_key_inclusive_clone = min_key_inclusive.clone();
-            let max_key_exclusive_clone = max_key_exclusive.clone();
-            join_set.spawn(async move {
-                let client = provider_manager
-                    .get_provider(leader.service_address)
-                    .await?;
-                let mut client_guard = client.lock().await;
-                let mut streaming = client_guard
-                    .list(Request::new(ListRequest {
-                        shard: Some(shard),
-                        start_inclusive: min_key_inclusive_clone,
-                        end_exclusive: max_key_exclusive_clone,
-                        secondary_index_name: None,
-                    }))
-                    .await?
-                    .into_inner();
-                let mut keys = Vec::new();
-                loop {
-                    match streaming.next().await {
-                        Some(response) => match response {
-                            Ok(mut response) => keys.append(&mut response.keys),
-                            Err(err) => {
-                                return Err(UnexpectedStatus(err.to_string()));
-                            }
-                        },
-                        None => break,
-                    }
+        let mut list_operation: ListOperation = options.into();
+        list_operation.min_key_inclusive = min_key_inclusive;
+        list_operation.max_key_exclusive = max_key_exclusive;
+
+        if list_operation.partition_key.is_some() {
+            let local_operation = list_operation.clone();
+            let partition_key = local_operation.partition_key.clone().unwrap();
+            return match self.inner.shard_manager.get_shard_leader(&partition_key) {
+                None => Err(KeyLeaderNotFound(partition_key)),
+                Some(leader) => {
+                    list_from_single_shard(
+                        leader,
+                        local_operation,
+                        self.inner.provider_manager.clone(),
+                    )
+                    .await
                 }
-                return Ok(keys);
-            });
+            };
         }
-        // todo: ordering by oxia sort
-        let mut output_keys = Vec::new();
+        let mut join_set = JoinSet::new();
+        for (_, leader) in self.inner.shard_manager.get_shards_leader() {
+            let local_operation = list_operation.clone();
+            join_set.spawn(list_from_single_shard(
+                leader,
+                local_operation,
+                self.inner.provider_manager.clone(),
+            ));
+        }
+        let mut output_keys: Vec<String> = Vec::new();
         for result in join_set.join_all().await {
-            let mut keys = result?;
-            output_keys.append(&mut keys);
+            let mut keys = result?.keys;
+            output_keys.append(&mut keys)
         }
         output_keys.sort_by(|left, right| key::compare(left, right));
         Ok(ListResult { keys: output_keys })
@@ -567,6 +559,34 @@ impl ClientImpl {
         };
         Ok((ref_mut.key().clone(), ref_mut.value().clone()))
     }
+}
+#[inline]
+async fn list_from_single_shard(
+    leader: Node,
+    local_operation: ListOperation,
+    provider_manager: Arc<ProviderManager>,
+) -> Result<ListResult, OxiaError> {
+    let provider = provider_manager
+        .get_provider(leader.service_address)
+        .await?;
+    let mut provider_guard = provider.lock().await;
+    let mut streaming = provider_guard
+        .list(Request::new(local_operation.to_proto()))
+        .await?
+        .into_inner();
+    let mut keys = Vec::new();
+    loop {
+        match streaming.next().await {
+            Some(response) => match response {
+                Ok(mut response) => keys.append(&mut response.keys),
+                Err(err) => {
+                    return Err(UnexpectedStatus(err.to_string()));
+                }
+            },
+            None => break,
+        }
+    }
+    Ok(ListResult { keys })
 }
 
 #[inline]
