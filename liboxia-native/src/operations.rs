@@ -1,4 +1,6 @@
-use crate::client::{DeleteOption, DeleteRangeOption, GetOption, ListOption, PutOption};
+use crate::client::{
+    DeleteOption, DeleteRangeOption, GetOption, ListOption, PutOption, RangeScanOption,
+};
 use crate::errors::OxiaError;
 use crate::oxia::{
     DeleteRangeRequest, DeleteRangeResponse, DeleteRequest, DeleteResponse, GetRequest,
@@ -378,6 +380,36 @@ pub(crate) struct RangeScanOperation {
     pub(crate) max_key_exclusive: String,
     pub(crate) partition_key: Option<String>,
     pub(crate) secondary_index_name: Option<String>,
+}
+
+impl Clone for RangeScanOperation {
+    fn clone(&self) -> Self {
+        RangeScanOperation {
+            callback: None,
+            shard_id: self.shard_id,
+            min_key_inclusive: self.min_key_inclusive.clone(),
+            max_key_exclusive: self.max_key_exclusive.clone(),
+            partition_key: self.partition_key.clone(),
+            secondary_index_name: self.secondary_index_name.clone(),
+        }
+    }
+}
+
+impl From<Vec<RangeScanOption>> for RangeScanOperation {
+    fn from(options: Vec<RangeScanOption>) -> Self {
+        let mut operation = RangeScanOperation::default();
+        for option in options {
+            match option {
+                RangeScanOption::PartitionKey(partition_key) => {
+                    operation.partition_key = Some(partition_key)
+                }
+                RangeScanOption::UseIndex(index) => {
+                    operation.secondary_index_name = Some(index);
+                }
+            }
+        }
+        operation
+    }
 }
 
 impl ToProtobuf<RangeScanRequest> for RangeScanOperation {

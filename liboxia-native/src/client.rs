@@ -7,9 +7,11 @@ use crate::errors::OxiaError::{
 use crate::key;
 use crate::operations::{
     DeleteOperation, DeleteRangeOperation, GetOperation, ListOperation, Operation, PutOperation,
-    ToProtobuf,
+    RangeScanOperation, ToProtobuf,
 };
-use crate::oxia::{KeyComparisonType, RangeScanRequest, SecondaryIndex, Status, Version};
+use crate::oxia::{
+    KeyComparisonType, SecondaryIndex, Status, Version,
+};
 use crate::provider_manager::ProviderManager;
 use crate::session_manager::SessionManager;
 use crate::shard_manager::{Node, ShardManager, ShardManagerOptions};
@@ -327,52 +329,39 @@ impl Client for ClientImpl {
         max_key_exclusive: String,
         options: Vec<RangeScanOption>,
     ) -> Result<RangeScanResult, OxiaError> {
-        let mut join_set = JoinSet::new();
-        for (shard, leader) in self.inner.shard_manager.get_shards_leader() {
-            let provider_manager = self.inner.provider_manager.clone();
-            let min_key_inclusive_clone = min_key_inclusive.clone();
-            let max_key_exclusive_clone = max_key_exclusive.clone();
-            join_set.spawn(async move {
-                let client = provider_manager
-                    .get_provider(leader.service_address)
-                    .await?;
-                let mut client_guard = client.lock().await;
-                let mut streaming = client_guard
-                    .range_scan(Request::new(RangeScanRequest {
-                        shard: Some(shard),
-                        start_inclusive: min_key_inclusive_clone,
-                        end_exclusive: max_key_exclusive_clone,
-                        secondary_index_name: None,
-                    }))
-                    .await?
-                    .into_inner();
-                let mut records = Vec::new();
-                loop {
-                    match streaming.next().await {
-                        Some(response) => match response {
-                            Ok(mut response) => records.append(&mut response.records),
-                            Err(err) => {
-                                return Err(UnexpectedStatus(err.to_string()));
-                            }
-                        },
-                        None => break,
-                    }
+        let mut operation: RangeScanOperation = options.into();
+        operation.min_key_inclusive = min_key_inclusive;
+        operation.max_key_exclusive = max_key_exclusive;
+        if operation.partition_key.is_some() {
+            let local_operation = operation.clone();
+            let partition_key = local_operation.partition_key.clone().unwrap();
+            return match self.inner.shard_manager.get_shard_leader(&partition_key) {
+                None => Err(KeyLeaderNotFound(partition_key)),
+                Some(leader) => {
+                    range_scan_from_single_shard(
+                        leader,
+                        local_operation,
+                        self.inner.provider_manager.clone(),
+                    )
+                    .await
                 }
-                return Ok(records);
-            });
+            };
         }
-        // todo: ordering by oxia sort
-        let mut output_records = Vec::new();
+        let mut join_set = JoinSet::new();
+        for (_, leader) in self.inner.shard_manager.get_shards_leader() {
+            let local_operation = operation.clone();
+            join_set.spawn(range_scan_from_single_shard(
+                leader,
+                local_operation,
+                self.inner.provider_manager.clone(),
+            ));
+        }
+        let mut output_records: Vec<GetResult> = Vec::new();
         for result in join_set.join_all().await {
-            let records = result?;
-            for record in records {
-                output_records.push(GetResult {
-                    key: record.key.unwrap(),
-                    value: record.value,
-                    version: record.version.unwrap(),
-                });
-            }
+            let mut records = result?.records;
+            output_records.append(&mut records)
         }
+        output_records.sort_by(|left, right| key::compare(&left.key, &right.key));
         Ok(RangeScanResult {
             records: output_records,
         })
@@ -560,6 +549,44 @@ impl ClientImpl {
         Ok((ref_mut.key().clone(), ref_mut.value().clone()))
     }
 }
+
+#[inline]
+async fn range_scan_from_single_shard(
+    leader: Node,
+    local_operation: RangeScanOperation,
+    provider_manager: Arc<ProviderManager>,
+) -> Result<RangeScanResult, OxiaError> {
+    let provider = provider_manager
+        .get_provider(leader.service_address)
+        .await?;
+    let mut provider_guard = provider.lock().await;
+    let mut streaming = provider_guard
+        .range_scan(Request::new(local_operation.to_proto()))
+        .await?
+        .into_inner();
+    let mut records = Vec::new();
+    loop {
+        match streaming.next().await {
+            Some(response) => match response {
+                Ok(response) => {
+                    for record in response.records {
+                        records.push(GetResult {
+                            key: record.key.unwrap(),
+                            value: record.value,
+                            version: record.version.unwrap(),
+                        })
+                    }
+                }
+                Err(err) => {
+                    return Err(UnexpectedStatus(err.to_string()));
+                }
+            },
+            None => break,
+        }
+    }
+    Ok(RangeScanResult { records })
+}
+
 #[inline]
 async fn list_from_single_shard(
     leader: Node,
