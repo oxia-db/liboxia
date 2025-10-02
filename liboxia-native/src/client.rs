@@ -18,7 +18,6 @@ use crate::write_stream_manager::WriteStreamManager;
 use dashmap::DashMap;
 use std::cmp::Ordering;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
@@ -249,6 +248,36 @@ impl Client for ClientImpl {
             Ok(results.swap_remove(index))
         }
     }
+    async fn delete_range(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
+        options: Vec<DeleteRangeOption>,
+    ) -> Result<(), OxiaError> {
+        let mut operation: DeleteRangeOperation = options.into();
+        operation.start_inclusive = min_key_inclusive.clone();
+        operation.end_exclusive = max_key_exclusive.clone();
+        if operation.partition_key.is_some() {
+            let (_, batch_manager) = self.get_or_init_batch_manager(
+                Batcher::Write,
+                &operation.partition_key.clone().unwrap(),
+            )?;
+            return delete_range_from_single_shard(operation.clone(), batch_manager.clone()).await;
+        }
+        let mut join_set = JoinSet::new();
+        for (shard, _) in self.inner.shard_manager.get_shards_leader() {
+            let (_, batch_manager) =
+                self.get_or_init_batch_manager_with_shard(Batcher::Write, shard)?;
+            join_set.spawn(delete_range_from_single_shard(
+                operation.clone(),
+                batch_manager.clone(),
+            ));
+        }
+        for result in join_set.join_all().await {
+            result?;
+        }
+        Ok(())
+    }
 
     async fn list(
         &self,
@@ -355,38 +384,6 @@ impl Client for ClientImpl {
         Ok(RangeScanResult {
             records: output_records,
         })
-    }
-
-    async fn delete_range(
-        &self,
-        min_key_inclusive: String,
-        max_key_exclusive: String,
-        options: Vec<DeleteRangeOption>,
-    ) -> Result<(), OxiaError> {
-        let mut join_set = JoinSet::new();
-        for (shard, _) in self.inner.shard_manager.get_shards_leader() {
-            let min_key_inclusive_clone = min_key_inclusive.clone();
-            let max_key_exclusive_clone = max_key_exclusive.clone();
-            let (_, batch_manager) = self
-                .get_or_init_batch_manager_with_shard(Batcher::Write, shard)?
-                .clone();
-            join_set.spawn(async move {
-                let (tx, rx) = oneshot::channel();
-                batch_manager.add(Operation::DeleteRange(DeleteRangeOperation {
-                    callback: Some(tx),
-                    start_inclusive: min_key_inclusive_clone,
-                    end_exclusive: max_key_exclusive_clone,
-                }))?;
-                let response = rx
-                    .await
-                    .map_err(|err| UnexpectedStatus(err.to_string()))??;
-                check_status(response.status)
-            });
-        }
-        for result in join_set.join_all().await {
-            result?;
-        }
-        Ok(())
     }
 
     async fn get_notifications(&self) -> Result<UnboundedReceiver<Notification>, OxiaError> {
@@ -570,6 +567,20 @@ impl ClientImpl {
         };
         Ok((ref_mut.key().clone(), ref_mut.value().clone()))
     }
+}
+
+#[inline]
+async fn delete_range_from_single_shard(
+    mut operation: DeleteRangeOperation,
+    batch_manager: Arc<BatchManager>,
+) -> Result<(), OxiaError> {
+    let (tx, rx) = oneshot::channel();
+    operation.callback = Some(tx);
+    batch_manager.add(Operation::DeleteRange(operation))?;
+    let response = rx
+        .await
+        .map_err(|err| UnexpectedStatus(err.to_string()))??;
+    check_status(response.status)
 }
 
 #[inline]

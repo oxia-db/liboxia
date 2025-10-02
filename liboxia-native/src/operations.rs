@@ -1,8 +1,9 @@
-use crate::client::{DeleteOption, GetOption, PutOption};
+use crate::client::{DeleteOption, DeleteRangeOption, GetOption, PutOption};
 use crate::errors::OxiaError;
 use crate::oxia::{
     DeleteRangeRequest, DeleteRangeResponse, DeleteRequest, DeleteResponse, GetRequest,
-    GetResponse, KeyComparisonType, PutRequest, PutResponse, SecondaryIndex,
+    GetResponse, KeyComparisonType, ListRequest, PutRequest, PutResponse, RangeScanRequest,
+    SecondaryIndex,
 };
 use log::warn;
 use oneshot::Sender;
@@ -164,8 +165,10 @@ impl CompletableOperation<DeleteResponse> for DeleteOperation {
     }
 }
 
+#[derive(Default)]
 pub struct DeleteRangeOperation {
     pub(crate) callback: Option<Sender<Result<DeleteRangeResponse, OxiaError>>>,
+    pub(crate) partition_key: Option<String>,
     pub(crate) start_inclusive: String,
     pub(crate) end_exclusive: String,
 }
@@ -173,6 +176,30 @@ pub struct DeleteRangeOperation {
 impl ToProtobuf<DeleteRangeRequest> for DeleteRangeOperation {
     fn to_proto(&self) -> DeleteRangeRequest {
         DeleteRangeRequest {
+            start_inclusive: self.start_inclusive.clone(),
+            end_exclusive: self.end_exclusive.clone(),
+        }
+    }
+}
+
+impl From<Vec<DeleteRangeOption>> for DeleteRangeOperation {
+    fn from(options: Vec<DeleteRangeOption>) -> Self {
+        let mut operation = DeleteRangeOperation::default();
+        for option in options {
+            match option {
+                DeleteRangeOption::PartitionKey(partition_key) => {
+                    operation.partition_key = Some(partition_key)
+                }
+            }
+        }
+        operation
+    }
+}
+impl Clone for DeleteRangeOperation {
+    fn clone(&self) -> Self {
+        DeleteRangeOperation {
+            callback: None,
+            partition_key: self.partition_key.clone(),
             start_inclusive: self.start_inclusive.clone(),
             end_exclusive: self.end_exclusive.clone(),
         }
@@ -287,6 +314,48 @@ impl ToProtobuf<GetRequest> for GetOperation {
             key: self.key.clone(),
             include_value: self.include_value,
             comparison_type: self.comparison_type as i32,
+            secondary_index_name: self.secondary_index_name.clone(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ListOperation {
+    pub(crate) callback: Option<Sender<Result<Vec<String>, OxiaError>>>,
+    pub(crate) shard_id: i64,
+    pub(crate) min_key_inclusive: String,
+    pub(crate) max_key_exclusive: String,
+    pub(crate) partition_key: Option<String>,
+    pub(crate) secondary_index_name: Option<String>,
+}
+
+impl ToProtobuf<ListRequest> for ListOperation {
+    fn to_proto(&self) -> ListRequest {
+        ListRequest {
+            shard: Some(self.shard_id),
+            start_inclusive: self.min_key_inclusive.clone(),
+            end_exclusive: self.max_key_exclusive.clone(),
+            secondary_index_name: self.secondary_index_name.clone(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct RangeScanOperation {
+    pub(crate) callback: Option<Sender<Result<Vec<GetResponse>, OxiaError>>>,
+    pub(crate) shard_id: i64,
+    pub(crate) min_key_inclusive: String,
+    pub(crate) max_key_exclusive: String,
+    pub(crate) partition_key: Option<String>,
+    pub(crate) secondary_index_name: Option<String>,
+}
+
+impl ToProtobuf<RangeScanRequest> for RangeScanOperation {
+    fn to_proto(&self) -> RangeScanRequest {
+        RangeScanRequest {
+            shard: Some(self.shard_id),
+            start_inclusive: self.min_key_inclusive.clone(),
+            end_exclusive: self.max_key_exclusive.clone(),
             secondary_index_name: self.secondary_index_name.clone(),
         }
     }
