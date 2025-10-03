@@ -1,10 +1,10 @@
 use crate::address::ensure_protocol;
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::UnexpectedStatus;
+use crate::errors::OxiaError::{Cancelled, UnexpectedStatus};
 use crate::oxia::shard_assignment::ShardBoundaries;
 use crate::oxia::{ShardAssignment, ShardAssignmentsRequest};
 use crate::provider_manager::ProviderManager;
-use backoff::ExponentialBackoff;
+use backoff::{Error, ExponentialBackoff};
 use dashmap::DashMap;
 use log::{info, warn};
 use std::collections::HashMap;
@@ -61,24 +61,26 @@ async fn start_assignments_listener(
                 .provider_manager
                 .get_provider(local_address)
                 .await
-                .map_err(|err| backoff::Error::transient(Status::internal(err.to_string())))?;
+                .map_err(|err| Error::transient(UnexpectedStatus(err.to_string())))?;
             let mut guard_provider = provider.lock().await;
             let mut streaming = guard_provider
                 .get_shard_assignments(ShardAssignmentsRequest {
                     namespace: ns.clone(),
                 })
-                .await?
+                .await
+                .map_err(|err| Error::transient(UnexpectedStatus(err.to_string())))?
                 .into_inner();
             drop(guard_provider);
             loop {
                 tokio::select! {
                     _ = local_context.cancelled() => {
-                        info!("Shards assignments listener exit due to cancellation.");
+                        info!("Close shards assignment stream due to context canceled.");
                         return Ok(());
                     }
                     result = streaming.next() => {
                         if result.is_none() {
-                                continue;
+                            info!("Close shards assignment stream due to stream closed.");
+                            return Ok(());
                         }
                         match result.unwrap() {
                         Ok(assignments) => {
@@ -95,7 +97,7 @@ async fn start_assignments_listener(
                             }
                         }
                         Err(stream_status) => {
-                             return Err(backoff::Error::transient(stream_status))
+                             return Err(Error::transient(UnexpectedStatus(stream_status.to_string())));
                         }
                     }
                     }

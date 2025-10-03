@@ -1,5 +1,6 @@
 use crate::client::{
-    DeleteOption, DeleteRangeOption, GetOption, ListOption, PutOption, RangeScanOption,
+    DeleteOption, DeleteRangeOption, GetOption, GetSequenceUpdatesOption, ListOption, PutOption,
+    RangeScanOption,
 };
 use crate::errors::OxiaError;
 use crate::oxia::{
@@ -420,6 +421,29 @@ impl ToProtobuf<RangeScanRequest> for RangeScanOperation {
             end_exclusive: self.max_key_exclusive.clone(),
             secondary_index_name: self.secondary_index_name.clone(),
         }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct GetSequenceUpdatesOperation {
+    pub(crate) partition_key: Option<String>,
+    pub(crate) buffer_size: usize
+}
+
+impl From<Vec<GetSequenceUpdatesOption>> for GetSequenceUpdatesOperation {
+    fn from(options: Vec<GetSequenceUpdatesOption>) -> Self {
+        let mut operation = GetSequenceUpdatesOperation::default();
+        for option in options {
+            match option {
+                GetSequenceUpdatesOption::PartitionKey(partition_key) => {
+                    operation.partition_key = Some(partition_key)
+                },
+                GetSequenceUpdatesOption::BufferSize(buffer_size) => {
+                    operation.buffer_size = buffer_size
+                }
+            }
+        }
+        operation
     }
 }
 

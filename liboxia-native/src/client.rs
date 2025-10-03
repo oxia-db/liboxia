@@ -2,23 +2,25 @@ use crate::batch_manager::{BatchManager, Batcher};
 use crate::client_options::OxiaClientOptions;
 use crate::errors::OxiaError;
 use crate::errors::OxiaError::{
-    KeyLeaderNotFound, KeyNotFound, SessionDoesNotExist, UnexpectedStatus, UnexpectedVersionId,
+    IllegalArgument, KeyLeaderNotFound, KeyNotFound, SessionDoesNotExist, UnexpectedStatus,
+    UnexpectedVersionId,
 };
 use crate::key;
 use crate::notification_manager::NotificationManager;
 use crate::operations::{
-    DeleteOperation, DeleteRangeOperation, GetOperation, ListOperation, Operation, PutOperation,
-    RangeScanOperation, ToProtobuf,
+    DeleteOperation, DeleteRangeOperation, GetOperation, GetSequenceUpdatesOperation,
+    ListOperation, Operation, PutOperation, RangeScanOperation, ToProtobuf,
 };
 use crate::oxia::{KeyComparisonType, NotificationType, SecondaryIndex, Status, Version};
 use crate::provider_manager::ProviderManager;
+use crate::sequence_updates_manager::SequenceUpdatesManager;
 use crate::session_manager::SessionManager;
 use crate::shard_manager::{Node, ShardManager, ShardManagerOptions};
 use crate::write_stream_manager::WriteStreamManager;
 use dashmap::DashMap;
 use std::cmp::Ordering;
 use std::sync::Arc;
-use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinSet;
 use tonic::codegen::tokio_stream::StreamExt;
@@ -97,6 +99,7 @@ pub struct RangeScanResult {
 
 pub enum GetSequenceUpdatesOption {
     PartitionKey(String),
+    BufferSize(usize),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -199,7 +202,7 @@ pub trait Client: Send + Sync + Clone {
         &self,
         key: String,
         options: Vec<GetSequenceUpdatesOption>,
-    ) -> Result<UnboundedReceiver<String>, OxiaError>;
+    ) -> Result<Receiver<String>, OxiaError>;
 
     async fn shutdown(self) -> Result<(), OxiaError>;
 }
@@ -209,7 +212,8 @@ pub(crate) struct Inner {
     pub(crate) provider_manager: Arc<ProviderManager>,
     pub(crate) shard_manager: Arc<ShardManager>,
     pub(crate) session_manager: Arc<SessionManager>,
-    pub(crate) notification_manager: Arc<Mutex<Vec<NotificationManager>>>,
+    pub(crate) notification_managers: Arc<Mutex<Vec<NotificationManager>>>,
+    pub(crate) sequence_updates_manager: Arc<Mutex<Vec<SequenceUpdatesManager>>>,
     pub(crate) write_stream_manager: Arc<WriteStreamManager>,
     pub(crate) write_batch_manager: DashMap<i64, Arc<BatchManager>>,
     pub(crate) read_batch_manager: DashMap<i64, Arc<BatchManager>>,
@@ -283,7 +287,7 @@ impl Client for ClientImpl {
             get_from_single_shard(operation.clone(), batch_manager).await
         } else {
             let mut join_set = JoinSet::new();
-            for (shard, leader) in self.inner.shard_manager.get_shards_leader() {
+            for (shard, _) in self.inner.shard_manager.get_shards_leader() {
                 let (_, batch_manager) = self
                     .get_or_init_batch_manager_with_shard(Batcher::Read, shard)?
                     .clone();
@@ -429,14 +433,13 @@ impl Client for ClientImpl {
         &self,
         buffer_size: usize,
     ) -> Result<Receiver<Notification>, OxiaError> {
-        let mut manager_guard = self.inner.notification_manager.lock().await;
+        let mut manager_guard = self.inner.notification_managers.lock().await;
         let (tx, rx) = mpsc::channel(buffer_size);
         let manager = NotificationManager::new(
             self.inner.shard_manager.clone(),
             self.inner.provider_manager.clone(),
             tx.clone(),
-        )
-        .await;
+        );
         manager_guard.push(manager);
         Ok(rx)
     }
@@ -445,8 +448,24 @@ impl Client for ClientImpl {
         &self,
         key: String,
         options: Vec<GetSequenceUpdatesOption>,
-    ) -> Result<UnboundedReceiver<String>, OxiaError> {
-        todo!()
+    ) -> Result<Receiver<String>, OxiaError> {
+        let mut manager_guard = self.inner.sequence_updates_manager.lock().await;
+        let operation: GetSequenceUpdatesOperation = options.into();
+        if operation.partition_key == None {
+            return Err(IllegalArgument(
+                "required option: partition_key".to_string(),
+            ));
+        }
+        let (tx, rx) = mpsc::channel(operation.buffer_size);
+        let manager = SequenceUpdatesManager::new(
+            key,
+            operation.partition_key.unwrap(),
+            self.inner.shard_manager.clone(),
+            self.inner.provider_manager.clone(),
+            tx,
+        );
+        manager_guard.push(manager);
+        Ok(rx)
     }
 
     async fn shutdown(self) -> Result<(), OxiaError> {
@@ -491,11 +510,27 @@ impl Client for ClientImpl {
             })??;
         }
 
-        for nm in match Arc::try_unwrap(inner.notification_manager) {
+        for nm in match Arc::try_unwrap(inner.notification_managers) {
             Ok(wsm) => wsm,
             Err(arc) => {
                 return Err(UnexpectedStatus(format!(
                     "Cannot shutdown notification managers: {} other references exist",
+                    Arc::strong_count(&arc)
+                )))
+            }
+        }
+        .lock()
+        .await
+        .drain(..)
+        {
+            nm.shutdown().await?
+        }
+
+        for nm in match Arc::try_unwrap(inner.sequence_updates_manager) {
+            Ok(wsm) => wsm,
+            Err(arc) => {
+                return Err(UnexpectedStatus(format!(
+                    "Cannot shutdown sequence updates managers: {} other references exist",
                     Arc::strong_count(&arc)
                 )))
             }
@@ -587,7 +622,8 @@ impl ClientImpl {
                 provider_manager,
                 shard_manager,
                 session_manager,
-                notification_manager: Arc::new(Mutex::new(Vec::new())),
+                notification_managers: Arc::new(Mutex::new(Vec::new())),
+                sequence_updates_manager: Arc::new(Mutex::new(Vec::new())),
                 write_batch_manager: DashMap::new(),
                 read_batch_manager: DashMap::new(),
             }),

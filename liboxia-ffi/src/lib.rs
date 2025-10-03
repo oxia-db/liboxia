@@ -47,6 +47,8 @@ pub enum COxiaError {
     UnexpectedVersionId = 7,
     SessionDoesNotExist = 8,
     InternalRetryable = 9,
+    Cancelled = 10,
+    IllegalArgument = 11,
 }
 
 impl From<OxiaError> for COxiaError {
@@ -61,6 +63,8 @@ impl From<OxiaError> for COxiaError {
             OxiaError::UnexpectedVersionId() => COxiaError::UnexpectedVersionId,
             OxiaError::SessionDoesNotExist() => COxiaError::SessionDoesNotExist,
             OxiaError::InternalRetryable() => COxiaError::InternalRetryable,
+            OxiaError::Cancelled() => COxiaError::Cancelled,
+            OxiaError::IllegalArgument(_) => COxiaError::IllegalArgument,
         }
     }
 }
@@ -123,7 +127,9 @@ pub extern "C" fn oxia_client_new(
 #[no_mangle]
 pub extern "C" fn oxia_client_free(client: *mut OxiaClient) {
     if !client.is_null() {
-        unsafe { Box::from_raw(client) };
+        unsafe {
+            let _ = Box::from_raw(client);
+        };
     }
 }
 
@@ -225,7 +231,9 @@ pub extern "C" fn oxia_put_result_free(result: *mut COxiaPutResult) {
     if !result.is_null() {
         let box_result = unsafe { Box::from_raw(result) };
         if !box_result.key.is_null() {
-            unsafe { CString::from_raw(box_result.key) };
+            unsafe {
+                let _ = CString::from_raw(box_result.key);
+            };
         }
     }
 }
@@ -236,7 +244,9 @@ pub extern "C" fn oxia_get_result_free(result: *mut COxiaGetResult) {
     if !result.is_null() {
         let box_result = unsafe { Box::from_raw(result) };
         if !box_result.key.is_null() {
-            unsafe { CString::from_raw(box_result.key) };
+            unsafe {
+                let _ = CString::from_raw(box_result.key);
+            };
         }
         if !box_result.value.is_null() {
             unsafe {

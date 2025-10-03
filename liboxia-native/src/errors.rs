@@ -28,4 +28,10 @@ pub enum OxiaError {
 
     #[error("retryable")]
     InternalRetryable(),
+
+    #[error("the operation has been cancelled")]
+    Cancelled(),
+
+    #[error("illegal argument: {0}")]
+    IllegalArgument(String),
 }

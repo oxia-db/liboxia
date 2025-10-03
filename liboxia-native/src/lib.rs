@@ -14,6 +14,7 @@ mod session_manager;
 mod status;
 mod key;
 mod notification_manager;
+mod sequence_updates_manager;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 pub mod oxia {

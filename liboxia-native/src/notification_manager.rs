@@ -1,6 +1,7 @@
+use crate::client::Notification;
 use crate::errors::OxiaError;
 use crate::errors::OxiaError::{ShardLeaderNotFound, UnexpectedStatus};
-use crate::oxia::{NotificationsRequest};
+use crate::oxia::NotificationsRequest;
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
 use backoff::{Error, ExponentialBackoff};
@@ -15,7 +16,6 @@ use tokio::sync::Mutex;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 use tonic::codegen::tokio_stream::StreamExt;
-use crate::client::Notification;
 
 struct NotificationListener {
     shard_id: i64,
@@ -65,6 +65,7 @@ impl NotificationListener {
                         .map_err(|err| UnexpectedStatus(err.to_string()))
                         .await?
                         .into_inner();
+                    drop(provider_guard);
                     loop {
                         tokio::select! {
                              _ = context.cancelled() => {
@@ -126,7 +127,7 @@ pub struct NotificationManager {
 }
 
 impl NotificationManager {
-    pub async fn new(
+    pub fn new(
         shard_manager: Arc<ShardManager>,
         provider_manager: Arc<ProviderManager>,
         sender: Sender<Notification>,
