@@ -3,6 +3,7 @@ members = [
     "liboxia-native",
     "liboxia-ffi"
 ]
+resolver = "2"
 
 [workspace.dependencies]
 backoff = { version = "0.4.0", features = ["tokio"] }

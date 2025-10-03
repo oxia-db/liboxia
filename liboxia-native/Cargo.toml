@@ -3,6 +3,11 @@ name = "liboxia"
 version = "0.0.1"
 edition = "2021"
 
+description = "Liboxia is a Rust library designed for both native Rust applications and for integration with other languages via its C Foreign Function Interface (FFI). It serves as a client SDK for Oxia, a distributed key-value store, enabling robust, asynchronous data operations."
+license = "Apache-2.0"
+repository = "https://github.com/oxia-db/liboxia"
+homepage = "https://github.com/oxia-db/liboxia"
+
 [dependencies]
 backoff = { workspace = true }
 tonic = { workspace = true }
@@ -14,11 +19,11 @@ xxhash-rust = { workspace = true }
 uuid = { workspace = true }
 tokio-util = { workspace = true }
 log = { workspace = true }
-futures = {workspace = true}
+futures = { workspace = true }
 
 [dev-dependencies]
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [build-dependencies]
-tonic-build = {workspace = true}
+tonic-build = { workspace = true }
