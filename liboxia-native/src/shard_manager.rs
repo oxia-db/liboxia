@@ -1,6 +1,6 @@
 use crate::address::ensure_protocol;
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::{Cancelled, UnexpectedStatus};
+use crate::errors::OxiaError::{UnexpectedStatus};
 use crate::oxia::shard_assignment::ShardBoundaries;
 use crate::oxia::{ShardAssignment, ShardAssignmentsRequest};
 use crate::provider_manager::ProviderManager;
@@ -13,7 +13,6 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::codegen::tokio_stream::StreamExt;
-use tonic::Status;
 
 pub struct ShardManagerOptions {
     pub address: String,

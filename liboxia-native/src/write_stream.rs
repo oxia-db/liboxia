@@ -113,12 +113,13 @@ impl WriteStream {
         }
     }
 
-    pub(crate) fn listen(&self, streaming: Streaming<WriteResponse>) {
-        tokio::spawn(handle_response(
+    pub(crate) async fn listen(&self, streaming: Streaming<WriteResponse>) {
+        let mut handle_guard = self.handle.lock().await;
+        *handle_guard = Some(tokio::spawn(handle_response(
             self.context.clone(),
             self.inner.clone(),
             streaming,
-        ));
+        )));
     }
 
     pub async fn shutdown(self) -> Result<(), OxiaError> {

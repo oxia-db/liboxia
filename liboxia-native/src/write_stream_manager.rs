@@ -72,7 +72,7 @@ impl WriteStreamManager {
                 .write_stream(write_stream_request)
                 .await?
                 .into_inner();
-            w_stream.listen(streaming);
+            w_stream.listen(streaming).await;
             Ok::<WriteStream, OxiaError>(w_stream)
         };
         let mut cell = self
