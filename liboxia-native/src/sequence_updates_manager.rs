@@ -14,7 +14,6 @@ use tonic::codegen::tokio_stream::StreamExt;
 use tonic::Request;
 
 pub struct SequenceUpdatesManager {
-    key: String,
     context: CancellationToken,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -37,7 +36,6 @@ impl SequenceUpdatesManager {
             sender.clone(),
         ));
         SequenceUpdatesManager {
-            key,
             context,
             handle: Mutex::new(Some(handle)),
         }

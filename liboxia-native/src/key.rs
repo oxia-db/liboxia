@@ -37,3 +37,83 @@ pub fn compare(mut a: &str, mut b: &str) -> Ordering {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use crate::key::compare;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn test_simple_strings() {
+        assert_eq!(compare("apple", "banana"), Ordering::Less);
+        assert_eq!(compare("zoo", "zebra"), Ordering::Greater);
+        assert_eq!(compare("test", "test"), Ordering::Equal);
+    }
+
+    #[test]
+    fn test_single_slash_paths() {
+        assert_eq!(compare("a/b", "a/c"), Ordering::Less);
+        assert_eq!(compare("a/b", "a/b"), Ordering::Equal);
+        assert_eq!(compare("a/c", "a/b"), Ordering::Greater);
+        assert_eq!(compare("apple/fruit", "banana/fruit"), Ordering::Less);
+        assert_eq!(compare("apple/fruit", "apple/grape"), Ordering::Less);
+    }
+
+    #[test]
+    fn test_multi_slash_paths() {
+        assert_eq!(compare("a/b/c", "a/b/d"), Ordering::Less);
+        assert_eq!(compare("a/b/c", "a/b/c"), Ordering::Equal);
+        assert_eq!(compare("a/b/c", "a/c/b"), Ordering::Less);
+        assert_eq!(compare("a/b/c/d", "a/b/e/f"), Ordering::Less);
+    }
+
+    #[test]
+    fn test_prefix_paths() {
+        assert_eq!(compare("a/b", "a/b/c"), Ordering::Less);
+        assert_eq!(compare("a/b/c", "a/b"), Ordering::Greater);
+        assert_eq!(compare("a", "a/b"), Ordering::Less);
+        assert_eq!(compare("a/b", "a"), Ordering::Greater);
+    }
+
+    #[test]
+    fn test_empty_segments() {
+        assert_eq!(compare("a//c", "a/b/c"), Ordering::Less);
+        assert_eq!(compare("a/b", "a/b/"), Ordering::Less);
+        assert_eq!(compare("a//", "a/b"), Ordering::Less);
+        assert_eq!(compare("", "a/b"), Ordering::Less);
+    }
+
+    #[test]
+    fn test_empty_strings() {
+        assert_eq!(compare("", ""), Ordering::Equal);
+        assert_eq!(compare("a", ""), Ordering::Greater);
+        assert_eq!(compare("", "a"), Ordering::Less);
+        assert_eq!(compare("", "/"), Ordering::Less);
+    }
+
+    #[test]
+    fn test_different_prefixes() {
+        assert_eq!(compare("c/a", "a/b"), Ordering::Greater);
+        assert_eq!(compare("a/b", "c/a"), Ordering::Less);
+    }
+
+    #[test]
+    fn test_paths_with_complex_characters() {
+        assert_eq!(compare("a-1/b", "a-2/b"), Ordering::Less);
+        assert_eq!(compare("a_1/b", "a_2/b"), Ordering::Less);
+        assert_eq!(compare("1/2/3", "1/2/4"), Ordering::Less);
+    }
+
+    #[test]
+    fn test_leading_trailing_slashes() {
+        assert_eq!(compare("/a/b", "a/b"), Ordering::Less);
+        assert_eq!(compare("a/b/", "a/b"), Ordering::Greater);
+        assert_eq!(compare("/a/b/", "a/b"), Ordering::Less);
+        assert_eq!(compare("/a/b/", "/a/b"), Ordering::Greater);
+    }
+
+    #[test]
+    fn test_root_vs_subdirectory() {
+        assert_eq!(compare("/", "a/b"), Ordering::Less);
+        assert_eq!(compare("a/b", "/"), Ordering::Greater);
+    }
+}

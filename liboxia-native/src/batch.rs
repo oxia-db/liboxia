@@ -10,8 +10,6 @@ use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
 use crate::write_stream_manager::WriteStreamManager;
 use std::sync::Arc;
-use sync::oneshot;
-use tokio::sync;
 use tonic::codegen::tokio_stream::StreamExt;
 use tonic::{Response, Streaming};
 
@@ -49,11 +47,6 @@ impl Batch {
     }
 }
 
-struct Inflight<T> {
-    future: oneshot::Sender<T>,
-    operation: Operation,
-}
-
 pub(crate) struct ReadBatch {
     get_inflight: Vec<GetOperation>,
     shard_id: i64,
@@ -78,7 +71,8 @@ impl ReadBatch {
         self.get_inflight.is_empty()
     }
 
-    fn can_add(&self, operation: &Operation) -> bool {
+    fn can_add(&self, _: &Operation) -> bool {
+        //todo: support it
         true
     }
     fn add(&mut self, operation: Operation) {
@@ -187,7 +181,8 @@ impl WriteBatch {
             && self.delete_range_inflight.is_empty()
     }
 
-    fn can_add(&self, operation: &Operation) -> bool {
+    fn can_add(&self, _: &Operation) -> bool {
+        //todo: support it
         true
     }
 

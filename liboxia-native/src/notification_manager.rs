@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use futures::TryFutureExt;
 use log::{info, warn};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{atomic, Arc};
+use std::sync::{Arc};
 use task::JoinHandle;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
@@ -18,9 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::codegen::tokio_stream::StreamExt;
 
 struct NotificationListener {
-    shard_id: i64,
     context: CancellationToken,
-    start_offset: Arc<AtomicI64>,
     join_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -38,7 +36,7 @@ impl NotificationListener {
         sender: Sender<Notification>,
     ) -> Self {
         let context = CancellationToken::new();
-        let start_offset = Arc::new(atomic::AtomicI64::new(-1));
+        let start_offset = Arc::new(AtomicI64::new(-1));
 
         let passing_context = context.clone();
         let passing_start_offset = start_offset.clone();
@@ -51,9 +49,7 @@ impl NotificationListener {
             passing_start_offset,
         ));
         NotificationListener {
-            shard_id,
             context,
-            start_offset,
             join_handle: Mutex::new(Some(handle)),
         }
     }
@@ -104,6 +100,7 @@ async fn start_notification_listener(
                 tokio::select! {
                      _ = context.cancelled() => {
                     info!("Close notification listener due to context canceled. shard_id={:?}", shard_id);
+                    break;
                 },
                 message = streaming.next() => match message {
                         None => {
@@ -131,13 +128,10 @@ async fn start_notification_listener(
         );
     };
     let backoff = ExponentialBackoff::default();
-    let _ = backoff::future::retry_notify(backoff, defer, notify).await;
+    _ = backoff::future::retry_notify(backoff, defer, notify).await;
 }
 
 pub struct NotificationManager {
-    shard_manager: Arc<ShardManager>,
-    provider_manager: Arc<ProviderManager>,
-
     listener: DashMap<i64, NotificationListener>,
 }
 
@@ -148,11 +142,9 @@ impl NotificationManager {
         sender: Sender<Notification>,
     ) -> Self {
         let manager = Self {
-            shard_manager: shard_manager.clone(),
-            provider_manager: provider_manager.clone(),
             listener: DashMap::new(),
         };
-        for (shard_id, node) in shard_manager.get_shards_leader() {
+        for (shard_id, _) in shard_manager.get_shards_leader() {
             let shard_sender = sender.clone();
             let listener = NotificationListener::new(
                 shard_id,

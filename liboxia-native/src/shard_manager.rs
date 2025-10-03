@@ -29,7 +29,6 @@ struct Inner {
 }
 
 pub struct ShardManager {
-    namespace: String,
     inner: Arc<Inner>,
     context: CancellationToken,
     assignment_handle: Mutex<Option<JoinHandle<()>>>,
@@ -132,7 +131,6 @@ impl ShardManager {
 
         init_rx.recv().await;
         let sm = ShardManager {
-            namespace: options.namespace,
             inner,
             context,
             assignment_handle: Mutex::new(Some(assignment_handle)),
