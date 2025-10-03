@@ -1,6 +1,6 @@
 use crate::client::{
-    DeleteOption, DeleteRangeOption, GetOption, GetSequenceUpdatesOption, ListOption, PutOption,
-    RangeScanOption,
+    DeleteOption, DeleteRangeOption, GetNotificationOption, GetOption, GetSequenceUpdatesOption,
+    ListOption, PutOption, RangeScanOption,
 };
 use crate::errors::OxiaError;
 use crate::oxia::{
@@ -324,7 +324,6 @@ impl ToProtobuf<GetRequest> for GetOperation {
 
 #[derive(Default)]
 pub(crate) struct ListOperation {
-    pub(crate) callback: Option<Sender<Result<Vec<String>, OxiaError>>>,
     pub(crate) shard_id: i64,
     pub(crate) min_key_inclusive: String,
     pub(crate) max_key_exclusive: String,
@@ -335,7 +334,6 @@ pub(crate) struct ListOperation {
 impl Clone for ListOperation {
     fn clone(&self) -> Self {
         ListOperation {
-            callback: None,
             shard_id: self.shard_id,
             min_key_inclusive: self.min_key_inclusive.clone(),
             max_key_exclusive: self.max_key_exclusive.clone(),
@@ -375,7 +373,6 @@ impl From<Vec<ListOption>> for ListOperation {
 
 #[derive(Default)]
 pub(crate) struct RangeScanOperation {
-    pub(crate) callback: Option<Sender<Result<Vec<GetResponse>, OxiaError>>>,
     pub(crate) shard_id: i64,
     pub(crate) min_key_inclusive: String,
     pub(crate) max_key_exclusive: String,
@@ -386,7 +383,6 @@ pub(crate) struct RangeScanOperation {
 impl Clone for RangeScanOperation {
     fn clone(&self) -> Self {
         RangeScanOperation {
-            callback: None,
             shard_id: self.shard_id,
             min_key_inclusive: self.min_key_inclusive.clone(),
             max_key_exclusive: self.max_key_exclusive.clone(),
@@ -424,10 +420,18 @@ impl ToProtobuf<RangeScanRequest> for RangeScanOperation {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct GetSequenceUpdatesOperation {
     pub(crate) partition_key: Option<String>,
-    pub(crate) buffer_size: usize
+    pub(crate) buffer_size: usize,
+}
+
+impl Default for GetSequenceUpdatesOperation {
+    fn default() -> Self {
+        GetSequenceUpdatesOperation {
+            partition_key: None,
+            buffer_size: 100,
+        }
+    }
 }
 
 impl From<Vec<GetSequenceUpdatesOption>> for GetSequenceUpdatesOperation {
@@ -437,8 +441,32 @@ impl From<Vec<GetSequenceUpdatesOption>> for GetSequenceUpdatesOperation {
             match option {
                 GetSequenceUpdatesOption::PartitionKey(partition_key) => {
                     operation.partition_key = Some(partition_key)
-                },
+                }
                 GetSequenceUpdatesOption::BufferSize(buffer_size) => {
+                    operation.buffer_size = buffer_size
+                }
+            }
+        }
+        operation
+    }
+}
+
+pub(crate) struct GetNotificationOperation {
+    pub(crate) buffer_size: usize,
+}
+
+impl Default for GetNotificationOperation {
+    fn default() -> Self {
+        GetNotificationOperation { buffer_size: 100 }
+    }
+}
+
+impl From<Vec<GetNotificationOption>> for GetNotificationOperation {
+    fn from(options: Vec<GetNotificationOption>) -> Self {
+        let mut operation = GetNotificationOperation::default();
+        for option in options {
+            match option {
+                GetNotificationOption::BufferSize(buffer_size) => {
                     operation.buffer_size = buffer_size
                 }
             }

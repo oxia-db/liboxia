@@ -8,8 +8,9 @@ use crate::errors::OxiaError::{
 use crate::key;
 use crate::notification_manager::NotificationManager;
 use crate::operations::{
-    DeleteOperation, DeleteRangeOperation, GetOperation, GetSequenceUpdatesOperation,
-    ListOperation, Operation, PutOperation, RangeScanOperation, ToProtobuf,
+    DeleteOperation, DeleteRangeOperation, GetNotificationOperation, GetOperation,
+    GetSequenceUpdatesOperation, ListOperation, Operation, PutOperation, RangeScanOperation,
+    ToProtobuf,
 };
 use crate::oxia::{KeyComparisonType, NotificationType, SecondaryIndex, Status, Version};
 use crate::provider_manager::ProviderManager;
@@ -95,6 +96,10 @@ pub enum RangeScanOption {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RangeScanResult {
     pub records: Vec<GetResult>,
+}
+
+pub enum GetNotificationOption {
+    BufferSize(usize),
 }
 
 pub enum GetSequenceUpdatesOption {
@@ -196,7 +201,7 @@ pub trait Client: Send + Sync + Clone {
 
     async fn get_notifications(
         &self,
-        buffer_size: usize,
+        options: Vec<GetNotificationOption>,
     ) -> Result<Receiver<Notification>, OxiaError>;
     async fn get_sequence_updates(
         &self,
@@ -431,10 +436,11 @@ impl Client for ClientImpl {
 
     async fn get_notifications(
         &self,
-        buffer_size: usize,
+        options: Vec<GetNotificationOption>,
     ) -> Result<Receiver<Notification>, OxiaError> {
         let mut manager_guard = self.inner.notification_managers.lock().await;
-        let (tx, rx) = mpsc::channel(buffer_size);
+        let operation: GetNotificationOperation = options.into();
+        let (tx, rx) = mpsc::channel(operation.buffer_size);
         let manager = NotificationManager::new(
             self.inner.shard_manager.clone(),
             self.inner.provider_manager.clone(),
