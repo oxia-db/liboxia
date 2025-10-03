@@ -7,17 +7,31 @@ use liboxia::client::{Client, ClientImpl};
 use liboxia::client_options::OxiaClientOptions;
 use liboxia::errors::OxiaError;
 
-// Client handle as an opaque pointer
+static GLOBAL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+fn get_runtime() -> &'static Runtime {
+    GLOBAL_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    })
+}
+
 pub struct OxiaClient(Box<ClientImpl>);
 
-// C-compatible PutResult struct
+#[repr(C)]
+pub struct COxiaClientOptions {
+    pub service_address: *const c_char,
+    pub namespace: *const c_char,
+}
+
 #[repr(C)]
 pub struct COxiaPutResult {
     pub key: *mut c_char,
     pub version_id: i64,
 }
 
-// C-compatible GetResult struct
 #[repr(C)]
 pub struct COxiaGetResult {
     pub key: *mut c_char,
@@ -26,14 +40,6 @@ pub struct COxiaGetResult {
     pub version_id: i64,
 }
 
-// C-compatible client options struct
-#[repr(C)]
-pub struct COxiaClientOptions {
-    pub service_address: *const c_char,
-    pub namespace: *const c_char,
-}
-
-// C-compatible error enum
 #[repr(i32)]
 #[derive(Debug, PartialEq)]
 pub enum COxiaError {
@@ -69,22 +75,6 @@ impl From<OxiaError> for COxiaError {
     }
 }
 
-// Global tokio runtime
-static GLOBAL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
-
-// Get or initialize the tokio runtime
-fn get_runtime() -> &'static Runtime {
-    GLOBAL_RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-    })
-}
-
-// C-FFI functions
-
-/// Creates a new OxiaClient
 #[no_mangle]
 pub extern "C" fn oxia_client_new(
     options: COxiaClientOptions,
@@ -123,7 +113,6 @@ pub extern "C" fn oxia_client_new(
     }
 }
 
-/// Frees the OxiaClient handle
 #[no_mangle]
 pub extern "C" fn oxia_client_free(client: *mut OxiaClient) {
     if !client.is_null() {
@@ -133,7 +122,6 @@ pub extern "C" fn oxia_client_free(client: *mut OxiaClient) {
     }
 }
 
-/// Performs a Put operation
 #[no_mangle]
 pub extern "C" fn oxia_client_put(
     client: *const OxiaClient,
@@ -165,7 +153,6 @@ pub extern "C" fn oxia_client_put(
     }
 }
 
-/// Performs a Get operation
 #[no_mangle]
 pub extern "C" fn oxia_client_get(
     client: *const OxiaClient,
@@ -210,7 +197,6 @@ pub extern "C" fn oxia_client_get(
     }
 }
 
-/// Shutdowns the client
 #[no_mangle]
 pub extern "C" fn oxia_client_shutdown(client: *mut OxiaClient) -> COxiaError {
     let rt = get_runtime();
@@ -225,7 +211,6 @@ pub extern "C" fn oxia_client_shutdown(client: *mut OxiaClient) -> COxiaError {
     }
 }
 
-/// Frees the C-compatible PutResult
 #[no_mangle]
 pub extern "C" fn oxia_put_result_free(result: *mut COxiaPutResult) {
     if !result.is_null() {
@@ -238,7 +223,6 @@ pub extern "C" fn oxia_put_result_free(result: *mut COxiaPutResult) {
     }
 }
 
-/// Frees the C-compatible GetResult
 #[no_mangle]
 pub extern "C" fn oxia_get_result_free(result: *mut COxiaGetResult) {
     if !result.is_null() {
