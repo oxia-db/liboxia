@@ -5,13 +5,12 @@ use crate::errors::OxiaError::{
     KeyLeaderNotFound, KeyNotFound, SessionDoesNotExist, UnexpectedStatus, UnexpectedVersionId,
 };
 use crate::key;
+use crate::notification_manager::NotificationManager;
 use crate::operations::{
     DeleteOperation, DeleteRangeOperation, GetOperation, ListOperation, Operation, PutOperation,
     RangeScanOperation, ToProtobuf,
 };
-use crate::oxia::{
-    KeyComparisonType, SecondaryIndex, Status, Version,
-};
+use crate::oxia::{KeyComparisonType, NotificationType, SecondaryIndex, Status, Version};
 use crate::provider_manager::ProviderManager;
 use crate::session_manager::SessionManager;
 use crate::shard_manager::{Node, ShardManager, ShardManagerOptions};
@@ -19,8 +18,8 @@ use crate::write_stream_manager::WriteStreamManager;
 use dashmap::DashMap;
 use std::cmp::Ordering;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::oneshot;
+use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinSet;
 use tonic::codegen::tokio_stream::StreamExt;
 use tonic::{async_trait, Request};
@@ -101,7 +100,62 @@ pub enum GetSequenceUpdatesOption {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Notification {}
+pub struct KeyCreated {
+    key: String,
+    version_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeyDeleted {
+    key: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeyModified {
+    key: String,
+    version_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeyRangeDeleted {
+    key: String,
+    key_range_last: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Notification {
+    KeyCreated(KeyCreated),
+    KeyDeleted(KeyDeleted),
+    KeyModified(KeyModified),
+    KeyRangeDeleted(KeyRangeDeleted),
+    Unknown(),
+}
+
+impl From<(String, crate::oxia::Notification)> for Notification {
+    fn from(tuple: (String, crate::oxia::Notification)) -> Self {
+        let (key, notification) = tuple;
+        if let Ok(notification_type) = NotificationType::try_from(notification.r#type) {
+            return match notification_type {
+                NotificationType::KeyCreated => Notification::KeyCreated(KeyCreated {
+                    key,
+                    version_id: notification.version_id,
+                }),
+                NotificationType::KeyModified => Notification::KeyModified(KeyModified {
+                    key,
+                    version_id: notification.version_id,
+                }),
+                NotificationType::KeyDeleted => Notification::KeyDeleted(KeyDeleted { key }),
+                NotificationType::KeyRangeDeleted => {
+                    Notification::KeyRangeDeleted(KeyRangeDeleted {
+                        key,
+                        key_range_last: notification.key_range_last,
+                    })
+                }
+            };
+        }
+        Notification::Unknown()
+    }
+}
 
 #[async_trait]
 pub trait Client: Send + Sync + Clone {
@@ -137,7 +191,10 @@ pub trait Client: Send + Sync + Clone {
         options: Vec<DeleteRangeOption>,
     ) -> Result<(), OxiaError>;
 
-    async fn get_notifications(&self) -> Result<UnboundedReceiver<Notification>, OxiaError>;
+    async fn get_notifications(
+        &self,
+        buffer_size: usize,
+    ) -> Result<Receiver<Notification>, OxiaError>;
     async fn get_sequence_updates(
         &self,
         key: String,
@@ -152,6 +209,7 @@ pub(crate) struct Inner {
     pub(crate) provider_manager: Arc<ProviderManager>,
     pub(crate) shard_manager: Arc<ShardManager>,
     pub(crate) session_manager: Arc<SessionManager>,
+    pub(crate) notification_manager: Arc<Mutex<Vec<NotificationManager>>>,
     pub(crate) write_stream_manager: Arc<WriteStreamManager>,
     pub(crate) write_batch_manager: DashMap<i64, Arc<BatchManager>>,
     pub(crate) read_batch_manager: DashMap<i64, Arc<BatchManager>>,
@@ -367,8 +425,20 @@ impl Client for ClientImpl {
         Ok(())
     }
 
-    async fn get_notifications(&self) -> Result<UnboundedReceiver<Notification>, OxiaError> {
-        todo!()
+    async fn get_notifications(
+        &self,
+        buffer_size: usize,
+    ) -> Result<Receiver<Notification>, OxiaError> {
+        let mut manager_guard = self.inner.notification_manager.lock().await;
+        let (tx, rx) = mpsc::channel(buffer_size);
+        let manager = NotificationManager::new(
+            self.inner.shard_manager.clone(),
+            self.inner.provider_manager.clone(),
+            tx.clone(),
+        )
+        .await;
+        manager_guard.push(manager);
+        Ok(rx)
     }
 
     async fn get_sequence_updates(
@@ -419,6 +489,22 @@ impl Client for ClientImpl {
             result.map_err(|err| {
                 UnexpectedStatus(format!("batcher task failed to join: {}", err))
             })??;
+        }
+
+        for nm in match Arc::try_unwrap(inner.notification_manager) {
+            Ok(wsm) => wsm,
+            Err(arc) => {
+                return Err(UnexpectedStatus(format!(
+                    "Cannot shutdown notification managers: {} other references exist",
+                    Arc::strong_count(&arc)
+                )))
+            }
+        }
+        .lock()
+        .await
+        .drain(..)
+        {
+            nm.shutdown().await?
         }
 
         match Arc::try_unwrap(inner.write_stream_manager) {
@@ -501,6 +587,7 @@ impl ClientImpl {
                 provider_manager,
                 shard_manager,
                 session_manager,
+                notification_manager: Arc::new(Mutex::new(Vec::new())),
                 write_batch_manager: DashMap::new(),
                 read_batch_manager: DashMap::new(),
             }),

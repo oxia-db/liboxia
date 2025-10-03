@@ -84,7 +84,9 @@ impl WriteStreamManager {
         let initialized = cell.initialized();
         let w_stream = cell.get_or_try_init(defer_init).await?;
         if !w_stream.is_alive().await {
-            cell.take();
+            if let Some(stream) = cell.take() {
+                stream.shutdown().await?;
+            }
             return Err(InternalRetryable());
         }
         if initialized {

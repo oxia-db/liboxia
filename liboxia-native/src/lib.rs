@@ -13,6 +13,7 @@ mod address;
 mod session_manager;
 mod status;
 mod key;
+mod notification_manager;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 pub mod oxia {
