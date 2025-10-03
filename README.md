@@ -13,6 +13,13 @@ asynchronous data operations.
   be exposed to C/C++ applications. The FFI layer manages complex data conversions and memory handling, ensuring a safe
   and efficient bridge between the Rust and C codebases.
 
+## Getting Started
+
+Please check the examples directory for usage examples.
+
+- liboxia-native: [liboxia-native/examples](./liboxia-native/examples)
+- liboxia-ffi: [liboxia-ffi/examples](./liboxia-ffi/examples)
+
 ## Contributing
 
 We welcome contributions from the community! To contribute to this project, please:
