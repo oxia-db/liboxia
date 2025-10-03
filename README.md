@@ -1,5 +1,11 @@
 # Liboxia
 
+
+[![Crates.io][crates-badge]][crates-url]
+
+[crates-badge]: https://img.shields.io/crates/v/liboxia.svg
+[crates-url]: https://crates.io/crates/liboxia
+
 Liboxia is a Rust library designed for both native Rust applications and for integration with other languages via its C
 Foreign Function Interface (FFI).
 It serves as a client SDK for [Oxia](https://github.com/oxia-db/oxia), a distributed key-value store, enabling robust,
