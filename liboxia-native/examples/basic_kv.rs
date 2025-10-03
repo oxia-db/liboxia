@@ -19,68 +19,53 @@ async fn main() {
     let key3 = String::from("key3");
     let payload = "payload".to_string().into_bytes();
     // put key - 1
-    let put_result = client
-        .put(key1.clone(), payload.clone(), vec![])
-        .await
-        .unwrap();
+    let put_result = client.put(key1.clone(), payload.clone()).await.unwrap();
     info!(
         "put the value. key {:?} value {:?} version {:?}",
         put_result.key, payload, put_result.version
     );
     // put key - 2
-    let put_result = client
-        .put(key2.clone(), payload.clone(), vec![])
-        .await
-        .unwrap();
+    let put_result = client.put(key2.clone(), payload.clone()).await.unwrap();
     info!(
         "put the value. key {:?} value {:?} version {:?}",
         put_result.key, payload, put_result.version
     );
     // put key - 3
-    let put_result = client
-        .put(key3.clone(), payload.clone(), vec![])
-        .await
-        .unwrap();
+    let put_result = client.put(key3.clone(), payload.clone()).await.unwrap();
     info!(
         "put the value. key {:?} value {:?} version {:?}",
         put_result.key, payload, put_result.version
     );
     // list keys
-    let list_result = client
-        .list("".to_string(), "/".to_string(), vec![])
-        .await
-        .unwrap();
+    let list_result = client.list("".to_string(), "/".to_string()).await.unwrap();
     info!("list the keys. keys {:?}", list_result.keys);
 
     // range-scan
     let range_scan_result = client
-        .range_scan("".to_string(), "/".to_string(), vec![])
+        .range_scan("".to_string(), "/".to_string())
         .await
         .unwrap();
     info!("range_scan result: {:?}", range_scan_result);
 
     // get key-1
-    let get_result = client.get(key1.clone(), vec![]).await.unwrap();
+    let get_result = client.get(key1.clone()).await.unwrap();
     info!(
         "get the value. key {:?} value {:?} version {:?}",
         get_result.key, get_result.value, get_result.version
     );
     // delete key-1
-    client.delete(key1.clone(), vec![]).await.unwrap();
+    client.delete(key1.clone()).await.unwrap();
     info!("deleted the key-1. key {:?} ", key1.clone());
-    let result = client.get(key1.clone(), vec![]).await;
+    let result = client.get(key1.clone()).await;
     info!("get the value again. error: {:?}", result.unwrap_err());
 
     // delete range
     client
-        .delete_range("".to_string(), "/".to_string(), vec![])
+        .delete_range("".to_string(), "/".to_string())
         .await
         .unwrap();
     info!("delete range keys.");
-    let list_result = client
-        .list("".to_string(), "/".to_string(), vec![])
-        .await
-        .unwrap();
+    let list_result = client.list("".to_string(), "/".to_string()).await.unwrap();
     info!("list the keys. keys {:?}", list_result.keys);
 
     client.shutdown().await.unwrap();

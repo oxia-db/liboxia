@@ -147,7 +147,7 @@ pub extern "C" fn oxia_client_put(
     let value = unsafe { slice::from_raw_parts(value, value_len).to_vec() };
     let result = rt.block_on(async {
         let rust_client = unsafe { &*client };
-        rust_client.0.put(key, value, vec![]).await
+        rust_client.0.put_with_options(key, value, vec![]).await
     });
 
     match result {
@@ -176,7 +176,7 @@ pub extern "C" fn oxia_client_get(
     let key = unsafe { CStr::from_ptr(key).to_str().unwrap().to_string() };
     let result = rt.block_on(async {
         let rust_client = unsafe { &*client };
-        rust_client.0.get(key, vec![]).await
+        rust_client.0.get_with_options(key, vec![]).await
     });
 
     match result {

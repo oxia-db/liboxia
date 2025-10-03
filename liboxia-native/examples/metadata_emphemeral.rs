@@ -21,7 +21,7 @@ async fn main() {
 
     // put ephemeral record
     let put_result = client
-        .put(key.clone(), payload.clone(), vec![PutOption::Ephemeral()])
+        .put_with_options(key.clone(), payload.clone(), vec![PutOption::Ephemeral()])
         .await
         .unwrap();
     info!(
@@ -33,7 +33,7 @@ async fn main() {
 
     // create a new client
     client = OxiaClientBuilder::new().build().await.unwrap();
-    let result = client.get(key.clone(), vec![]).await;
+    let result = client.get(key.clone()).await;
     info!("get the value again. error: {:?}", result.unwrap_err());
 
     client.shutdown().await.unwrap();

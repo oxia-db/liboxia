@@ -167,18 +167,38 @@ impl From<(String, crate::oxia::Notification)> for Notification {
 
 #[async_trait]
 pub trait Client: Send + Sync + Clone {
-    async fn put(
+    async fn put(&self, key: String, value: Vec<u8>) -> Result<PutResult, OxiaError>;
+
+    async fn put_with_options(
         &self,
         key: String,
         value: Vec<u8>,
         options: Vec<PutOption>,
     ) -> Result<PutResult, OxiaError>;
 
-    async fn delete(&self, key: String, options: Vec<DeleteOption>) -> Result<(), OxiaError>;
+    async fn delete(&self, key: String) -> Result<(), OxiaError>;
 
-    async fn get(&self, key: String, options: Vec<GetOption>) -> Result<GetResult, OxiaError>;
+    async fn delete_with_options(
+        &self,
+        key: String,
+        options: Vec<DeleteOption>,
+    ) -> Result<(), OxiaError>;
+
+    async fn get(&self, key: String) -> Result<GetResult, OxiaError>;
+
+    async fn get_with_options(
+        &self,
+        key: String,
+        options: Vec<GetOption>,
+    ) -> Result<GetResult, OxiaError>;
 
     async fn list(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
+    ) -> Result<ListResult, OxiaError>;
+
+    async fn list_with_options(
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
@@ -189,6 +209,12 @@ pub trait Client: Send + Sync + Clone {
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
+    ) -> Result<RangeScanResult, OxiaError>;
+
+    async fn range_scan_with_options(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
         options: Vec<RangeScanOption>,
     ) -> Result<RangeScanResult, OxiaError>;
 
@@ -196,14 +222,25 @@ pub trait Client: Send + Sync + Clone {
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
+    ) -> Result<(), OxiaError>;
+
+    async fn delete_range_with_options(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
         options: Vec<DeleteRangeOption>,
     ) -> Result<(), OxiaError>;
 
-    async fn get_notifications(
+    async fn get_notifications(&self) -> Result<Receiver<Notification>, OxiaError>;
+
+    async fn get_notifications_with_options(
         &self,
         options: Vec<GetNotificationOption>,
     ) -> Result<Receiver<Notification>, OxiaError>;
-    async fn get_sequence_updates(
+
+    async fn get_sequence_updates(&self, key: String) -> Result<Receiver<String>, OxiaError>;
+
+    async fn get_sequence_updates_with_options(
         &self,
         key: String,
         options: Vec<GetSequenceUpdatesOption>,
@@ -231,7 +268,11 @@ pub struct ClientImpl {
 
 #[async_trait]
 impl Client for ClientImpl {
-    async fn put(
+    async fn put(&self, key: String, value: Vec<u8>) -> Result<PutResult, OxiaError> {
+        self.put_with_options(key, value, vec![]).await
+    }
+
+    async fn put_with_options(
         &self,
         key: String,
         value: Vec<u8>,
@@ -261,7 +302,15 @@ impl Client for ClientImpl {
         })
     }
 
-    async fn delete(&self, key: String, options: Vec<DeleteOption>) -> Result<(), OxiaError> {
+    async fn delete(&self, key: String) -> Result<(), OxiaError> {
+        self.delete_with_options(key, vec![]).await
+    }
+
+    async fn delete_with_options(
+        &self,
+        key: String,
+        options: Vec<DeleteOption>,
+    ) -> Result<(), OxiaError> {
         let (tx, rx) = oneshot::channel();
         let mut operation: DeleteOperation = options.into();
         operation.callback = Some(tx);
@@ -278,7 +327,15 @@ impl Client for ClientImpl {
         Ok(check_status(response.status)?)
     }
 
-    async fn get(&self, key: String, options: Vec<GetOption>) -> Result<GetResult, OxiaError> {
+    async fn get(&self, key: String) -> Result<GetResult, OxiaError> {
+        self.get_with_options(key, vec![]).await
+    }
+
+    async fn get_with_options(
+        &self,
+        key: String,
+        options: Vec<GetOption>,
+    ) -> Result<GetResult, OxiaError> {
         let mut operation: GetOperation = options.into();
         operation.key = key.clone();
         if operation.partition_key.is_some() {
@@ -316,7 +373,17 @@ impl Client for ClientImpl {
             Ok(results.swap_remove(index))
         }
     }
+
     async fn list(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
+    ) -> Result<ListResult, OxiaError> {
+        self.list_with_options(min_key_inclusive, max_key_exclusive, vec![])
+            .await
+    }
+
+    async fn list_with_options(
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
@@ -360,6 +427,15 @@ impl Client for ClientImpl {
     }
 
     async fn range_scan(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
+    ) -> Result<RangeScanResult, OxiaError> {
+        self.range_scan_with_options(min_key_inclusive, max_key_exclusive, vec![])
+            .await
+    }
+
+    async fn range_scan_with_options(
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
@@ -407,6 +483,15 @@ impl Client for ClientImpl {
         &self,
         min_key_inclusive: String,
         max_key_exclusive: String,
+    ) -> Result<(), OxiaError> {
+        self.delete_range_with_options(min_key_inclusive, max_key_exclusive, vec![])
+            .await
+    }
+
+    async fn delete_range_with_options(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
         options: Vec<DeleteRangeOption>,
     ) -> Result<(), OxiaError> {
         let mut operation: DeleteRangeOperation = options.into();
@@ -434,7 +519,11 @@ impl Client for ClientImpl {
         Ok(())
     }
 
-    async fn get_notifications(
+    async fn get_notifications(&self) -> Result<Receiver<Notification>, OxiaError> {
+        self.get_notifications_with_options(vec![]).await
+    }
+
+    async fn get_notifications_with_options(
         &self,
         options: Vec<GetNotificationOption>,
     ) -> Result<Receiver<Notification>, OxiaError> {
@@ -450,7 +539,11 @@ impl Client for ClientImpl {
         Ok(rx)
     }
 
-    async fn get_sequence_updates(
+    async fn get_sequence_updates(&self, key: String) -> Result<Receiver<String>, OxiaError> {
+        self.get_sequence_updates_with_options(key, vec![]).await
+    }
+
+    async fn get_sequence_updates_with_options(
         &self,
         key: String,
         options: Vec<GetSequenceUpdatesOption>,
