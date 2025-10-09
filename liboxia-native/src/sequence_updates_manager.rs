@@ -74,11 +74,10 @@ async fn start_listener(
                 Some(shard) => match shard_manager.get_leader(shard) {
                     None => Err(Error::transient(KeyLeaderNotFound(partition_key.clone()))),
                     Some(leader) => {
-                        let provider = provider_manager
+                        let mut provider = provider_manager
                             .get_provider(leader.service_address)
                             .await?;
-                        let mut provider_guard = provider.lock().await;
-                        let mut streaming = provider_guard
+                        let mut streaming = provider
                             .get_sequence_updates(Request::new(GetSequenceUpdatesRequest {
                                 shard,
                                 key,
@@ -86,7 +85,6 @@ async fn start_listener(
                             .await
                             .map_err(|err| Error::transient(UnexpectedStatus(err.to_string())))?
                             .into_inner();
-                        drop(provider_guard);
                         loop {
                             tokio::select! {
                                 _ = context.cancelled() => {

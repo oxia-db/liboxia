@@ -95,8 +95,7 @@ impl ReadBatch {
             .get_provider(node.service_address)
             .await
         {
-            Ok(provider) => {
-                let mut provider_guard = provider.lock().await;
+            Ok(mut provider) => {
                 let mut request = ReadRequest {
                     shard: Some(self.shard_id),
                     gets: vec![],
@@ -104,7 +103,7 @@ impl ReadBatch {
                 for operation in self.get_inflight.iter() {
                     request.gets.push(operation.to_proto());
                 }
-                match provider_guard.read(request).await {
+                match provider.read(request).await {
                     Ok(response) => {
                         let result = self.receive_all(response).await;
                         if result.is_err() {

@@ -47,12 +47,11 @@ impl WriteStreamManager {
             return Err(OxiaError::ShardLeaderNotFound(shard_id));
         }
         let defer_init = || async {
-            let client = self
+            let mut provider = self
                 .provider_manager
                 .get_provider(option.unwrap().service_address)
                 .await?;
             let (tx, rx) = mpsc::unbounded_channel();
-            let mut client_guard = client.lock().await;
             let mut write_stream_request = Request::new(UnboundedReceiverStream::new(rx));
             let write_stream_request_metadata = write_stream_request.metadata_mut();
             write_stream_request_metadata.insert(
@@ -68,7 +67,7 @@ impl WriteStreamManager {
             // otherwise, write_stream will hang forever.
             let w_stream = WriteStream::new(tx);
             w_stream.send_defer(request.clone()).await?;
-            let streaming = client_guard
+            let streaming = provider
                 .write_stream(write_stream_request)
                 .await?
                 .into_inner();

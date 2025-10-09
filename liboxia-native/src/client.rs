@@ -778,11 +778,10 @@ async fn range_scan_from_single_shard(
     local_operation: RangeScanOperation,
     provider_manager: Arc<ProviderManager>,
 ) -> Result<RangeScanResult, OxiaError> {
-    let provider = provider_manager
+    let mut provider = provider_manager
         .get_provider(leader.service_address)
         .await?;
-    let mut provider_guard = provider.lock().await;
-    let mut streaming = provider_guard
+    let mut streaming = provider
         .range_scan(Request::new(local_operation.to_proto()))
         .await?
         .into_inner();
@@ -815,11 +814,10 @@ async fn list_from_single_shard(
     local_operation: ListOperation,
     provider_manager: Arc<ProviderManager>,
 ) -> Result<ListResult, OxiaError> {
-    let provider = provider_manager
+    let mut provider = provider_manager
         .get_provider(leader.service_address)
         .await?;
-    let mut provider_guard = provider.lock().await;
-    let mut streaming = provider_guard
+    let mut streaming = provider
         .list(Request::new(local_operation.to_proto()))
         .await?
         .into_inner();

@@ -80,14 +80,13 @@ async fn start_notification_listener(
         let provider_manager = provider_manager.clone();
         let sender = sender.clone();
         async move {
-            let provider = match shard_manager.get_leader(shard_id) {
+            let mut provider = match shard_manager.get_leader(shard_id) {
                 None => Err(ShardLeaderNotFound(shard_id)),
                 Some(leader) => Ok(provider_manager
                     .get_provider(leader.service_address)
                     .await?),
             }?;
-            let mut provider_guard = provider.lock().await;
-            let mut streaming = provider_guard
+            let mut streaming = provider
                 .get_notifications(NotificationsRequest {
                     shard: shard_id,
                     start_offset_exclusive: Some(offset_ref.load(Ordering::Acquire)),
@@ -95,7 +94,6 @@ async fn start_notification_listener(
                 .map_err(|err| UnexpectedStatus(err.to_string()))
                 .await?
                 .into_inner();
-            drop(provider_guard);
             loop {
                 tokio::select! {
                      _ = context.cancelled() => {

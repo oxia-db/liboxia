@@ -55,20 +55,18 @@ async fn start_assignments_listener(
         let ns = namespace.clone();
         let init_sender = init_tx.clone();
         async move {
-            let provider = local_inner
+            let mut provider = local_inner
                 .provider_manager
                 .get_provider(local_address)
                 .await
                 .map_err(|err| Error::transient(UnexpectedStatus(err.to_string())))?;
-            let mut guard_provider = provider.lock().await;
-            let mut streaming = guard_provider
+            let mut streaming = provider
                 .get_shard_assignments(ShardAssignmentsRequest {
                     namespace: ns.clone(),
                 })
                 .await
                 .map_err(|err| Error::transient(UnexpectedStatus(err.to_string())))?
                 .into_inner();
-            drop(guard_provider);
             loop {
                 tokio::select! {
                     _ = local_context.cancelled() => {

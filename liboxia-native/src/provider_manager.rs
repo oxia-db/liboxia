@@ -7,14 +7,14 @@ use tokio::sync::{Mutex, OnceCell};
 use tonic::transport::Channel;
 
 pub struct ProviderManager {
-    providers: Arc<DashMap<String, OnceCell<Arc<Mutex<OxiaClientClient<Channel>>>>>>,
+    providers: Arc<DashMap<String, OnceCell<OxiaClientClient<Channel>>>>,
 }
 
 impl ProviderManager {
     pub async fn get_provider(
         &self,
         address: String,
-    ) -> Result<Arc<Mutex<OxiaClientClient<Channel>>>, OxiaError> {
+    ) -> Result<OxiaClientClient<Channel>, OxiaError> {
         let once_cell = self
             .providers
             .entry(address.clone())
@@ -24,7 +24,7 @@ impl ProviderManager {
                 let client = OxiaClientClient::connect(address)
                     .await
                     .map_err(|err| UnexpectedStatus(err.to_string()))?;
-                Ok::<Arc<Mutex<OxiaClientClient<Channel>>>, OxiaError>(Arc::new(Mutex::new(client)))
+                Ok::<OxiaClientClient<Channel>, OxiaError>(client.clone())
             })
             .await?
             .clone();

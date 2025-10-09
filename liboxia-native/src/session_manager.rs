@@ -83,7 +83,7 @@ async fn start_keep_alive(
             match local_shard_manager.get_leader(shard_id) {
                 None => Err(Error::transient(ShardLeaderNotFound(shard_id))),
                 Some(leader) => {
-                    let provider = local_provider_manager
+                    let mut provider = local_provider_manager
                         .get_provider(leader.service_address)
                         .await?;
                     loop {
@@ -93,8 +93,7 @@ async fn start_keep_alive(
                             return Ok(());
                         },
                         else => {
-                            let mut provider_guard = provider.lock().await;
-                            let _ = provider_guard
+                            let _ = provider
                                 .keep_alive(Request::new(SessionHeartbeat { shard: shard_id, session_id, }))
                                 .await
                                 .map_err(|err| {
@@ -126,9 +125,8 @@ impl Session {
         let shard_manager = self.inner.shard_manager.clone();
         let provider_manager = self.inner.provider_manager.clone();
         if let Some(node) = shard_manager.get_leader(self.inner.shard_id) {
-            let client = provider_manager.get_provider(node.service_address).await?;
-            let mut client_guard = client.lock().await;
-            let result = client_guard
+            let mut provider = provider_manager.get_provider(node.service_address).await?;
+            let result = provider
                 .close_session(Request::new(CloseSessionRequest {
                     shard: self.inner.shard_id,
                     session_id: self.inner.id,
@@ -190,12 +188,11 @@ impl SessionManager {
                 match self.shard_manager.get_leader(shard_id) {
                     None => Err(ShardLeaderNotFound(shard_id)),
                     Some(node) => {
-                        let client = self
+                        let mut provider = self
                             .provider_manager
                             .get_provider(node.service_address)
                             .await?;
-                        let mut client_guard = client.lock().await;
-                        let response = client_guard
+                        let response = provider
                             .create_session(Request::new(CreateSessionRequest {
                                 shard: shard_id,
                                 session_timeout_ms: self.session_timeout.clone().as_millis() as u32,
