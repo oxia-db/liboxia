@@ -485,7 +485,7 @@ impl OxiaClient {
 #[async_trait]
 impl Client for OxiaClient {
     async fn put(&self, key: String, value: Vec<u8>) -> Result<PutResult, OxiaError> {
-        self.put_with_options(key, value, vec![]).await
+        <Self as Client>::put_with_options(self, key, value, vec![]).await
     }
 
     async fn put_with_options(
@@ -519,7 +519,7 @@ impl Client for OxiaClient {
     }
 
     async fn delete(&self, key: String) -> Result<(), OxiaError> {
-        self.delete_with_options(key, vec![]).await
+        <Self as Client>::delete_with_options(self, key, vec![]).await
     }
 
     async fn delete_with_options(
@@ -544,7 +544,7 @@ impl Client for OxiaClient {
     }
 
     async fn get(&self, key: String) -> Result<GetResult, OxiaError> {
-        self.get_with_options(key, vec![]).await
+        <Self as Client>::get_with_options(self, key, vec![]).await
     }
 
     async fn get_with_options(
@@ -595,7 +595,7 @@ impl Client for OxiaClient {
         min_key_inclusive: String,
         max_key_exclusive: String,
     ) -> Result<ListResult, OxiaError> {
-        self.list_with_options(min_key_inclusive, max_key_exclusive, vec![])
+        <Self as Client>::list_with_options(self, min_key_inclusive, max_key_exclusive, vec![])
             .await
     }
 
@@ -647,7 +647,7 @@ impl Client for OxiaClient {
         min_key_inclusive: String,
         max_key_exclusive: String,
     ) -> Result<RangeScanResult, OxiaError> {
-        self.range_scan_with_options(min_key_inclusive, max_key_exclusive, vec![])
+        <Self as Client>::range_scan_with_options(self, min_key_inclusive, max_key_exclusive, vec![])
             .await
     }
 
@@ -700,7 +700,7 @@ impl Client for OxiaClient {
         min_key_inclusive: String,
         max_key_exclusive: String,
     ) -> Result<(), OxiaError> {
-        self.delete_range_with_options(min_key_inclusive, max_key_exclusive, vec![])
+        <Self as Client>::delete_range_with_options(self, min_key_inclusive, max_key_exclusive, vec![])
             .await
     }
 
@@ -736,7 +736,7 @@ impl Client for OxiaClient {
     }
 
     async fn get_notifications(&self) -> Result<Receiver<Notification>, OxiaError> {
-        self.get_notifications_with_options(vec![]).await
+        <Self as Client>::get_notifications_with_options(self, vec![]).await
     }
 
     async fn get_notifications_with_options(
@@ -756,7 +756,7 @@ impl Client for OxiaClient {
     }
 
     async fn get_sequence_updates(&self, key: String) -> Result<Receiver<String>, OxiaError> {
-        self.get_sequence_updates_with_options(key, vec![]).await
+        <Self as Client>::get_sequence_updates_with_options(self, key, vec![]).await
     }
 
     async fn get_sequence_updates_with_options(
