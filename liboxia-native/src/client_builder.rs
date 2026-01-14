@@ -1,5 +1,5 @@
 use crate::address::ensure_protocol;
-use crate::client::{Client, ClientImpl};
+use crate::client::OxiaClient;
 use crate::client_options::OxiaClientOptions;
 use crate::errors::OxiaError;
 use std::time::Duration;
@@ -43,7 +43,7 @@ impl OxiaClientBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<impl Client, OxiaError> {
+    pub async fn build(self) -> Result<OxiaClient, OxiaError> {
         let mut options = OxiaClientOptions::default();
         if let Some(service_address) = self.service_address {
             options.service_address = service_address
@@ -60,6 +60,6 @@ impl OxiaClientBuilder {
         if let Some(batch_max_size) = self.batch_max_size {
             options.batch_max_size = batch_max_size;
         }
-        ClientImpl::new(options).await
+        OxiaClient::new(options).await
     }
 }

@@ -1,4 +1,3 @@
-use liboxia::client::Client;
 use liboxia::client::PutOption;
 use liboxia::client_builder::OxiaClientBuilder;
 use log::info;
