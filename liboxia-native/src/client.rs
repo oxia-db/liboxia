@@ -165,8 +165,9 @@ impl From<(String, crate::oxia::Notification)> for Notification {
     }
 }
 
+// Internal trait for client operations - not exposed to users
 #[async_trait]
-pub trait Client: Send + Sync + Clone {
+trait Client: Send + Sync + Clone {
     async fn put(&self, key: String, value: Vec<u8>) -> Result<PutResult, OxiaError>;
 
     async fn put_with_options(
@@ -261,13 +262,228 @@ pub(crate) struct Inner {
     pub(crate) read_batch_manager: DashMap<i64, Arc<BatchManager>>,
 }
 
+/// The Oxia client for interacting with the Oxia distributed key-value store.
+/// 
+/// This is the main client struct that users should use to interact with Oxia.
+/// It can be easily stored in other structs and cloned efficiently.
 #[derive(Clone)]
-pub struct ClientImpl {
+pub struct OxiaClient {
     inner: Arc<Inner>,
 }
 
+impl OxiaClient {
+    pub async fn new(options: OxiaClientOptions) -> Result<OxiaClient, OxiaError> {
+        let provider_manager = Arc::new(ProviderManager::new());
+        let shard_manager = Arc::new(
+            ShardManager::new(ShardManagerOptions {
+                address: options.service_address.clone(),
+                namespace: options.namespace.clone(),
+                provider_manager: provider_manager.clone(),
+            })
+            .await?,
+        );
+        let write_stream_manager = Arc::new(WriteStreamManager::new(
+            options.namespace.clone(),
+            shard_manager.clone(),
+            provider_manager.clone(),
+        ));
+        let session_manager = Arc::new(SessionManager::new(
+            options.identity.clone(),
+            options.session_timeout,
+            shard_manager.clone(),
+            provider_manager.clone(),
+        ));
+        Ok(OxiaClient {
+            inner: Arc::new(Inner {
+                options,
+                write_stream_manager,
+                provider_manager,
+                shard_manager,
+                session_manager,
+                notification_managers: Arc::new(Mutex::new(Vec::new())),
+                sequence_updates_manager: Arc::new(Mutex::new(Vec::new())),
+                write_batch_manager: DashMap::new(),
+                read_batch_manager: DashMap::new(),
+            }),
+        })
+    }
+
+    pub async fn put(&self, key: String, value: Vec<u8>) -> Result<PutResult, OxiaError> {
+        self.put_with_options(key, value, vec![]).await
+    }
+
+    pub async fn put_with_options(
+        &self,
+        key: String,
+        value: Vec<u8>,
+        options: Vec<PutOption>,
+    ) -> Result<PutResult, OxiaError> {
+        <Self as Client>::put_with_options(self, key, value, options).await
+    }
+
+    pub async fn delete(&self, key: String) -> Result<(), OxiaError> {
+        self.delete_with_options(key, vec![]).await
+    }
+
+    pub async fn delete_with_options(
+        &self,
+        key: String,
+        options: Vec<DeleteOption>,
+    ) -> Result<(), OxiaError> {
+        <Self as Client>::delete_with_options(self, key, options).await
+    }
+
+    pub async fn get(&self, key: String) -> Result<GetResult, OxiaError> {
+        self.get_with_options(key, vec![]).await
+    }
+
+    pub async fn get_with_options(
+        &self,
+        key: String,
+        options: Vec<GetOption>,
+    ) -> Result<GetResult, OxiaError> {
+        <Self as Client>::get_with_options(self, key, options).await
+    }
+
+    pub async fn list(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
+    ) -> Result<ListResult, OxiaError> {
+        self.list_with_options(min_key_inclusive, max_key_exclusive, vec![])
+            .await
+    }
+
+    pub async fn list_with_options(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
+        options: Vec<ListOption>,
+    ) -> Result<ListResult, OxiaError> {
+        <Self as Client>::list_with_options(self, min_key_inclusive, max_key_exclusive, options)
+            .await
+    }
+
+    pub async fn range_scan(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
+    ) -> Result<RangeScanResult, OxiaError> {
+        self.range_scan_with_options(min_key_inclusive, max_key_exclusive, vec![])
+            .await
+    }
+
+    pub async fn range_scan_with_options(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
+        options: Vec<RangeScanOption>,
+    ) -> Result<RangeScanResult, OxiaError> {
+        <Self as Client>::range_scan_with_options(
+            self,
+            min_key_inclusive,
+            max_key_exclusive,
+            options,
+        )
+        .await
+    }
+
+    pub async fn delete_range(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
+    ) -> Result<(), OxiaError> {
+        self.delete_range_with_options(min_key_inclusive, max_key_exclusive, vec![])
+            .await
+    }
+
+    pub async fn delete_range_with_options(
+        &self,
+        min_key_inclusive: String,
+        max_key_exclusive: String,
+        options: Vec<DeleteRangeOption>,
+    ) -> Result<(), OxiaError> {
+        <Self as Client>::delete_range_with_options(
+            self,
+            min_key_inclusive,
+            max_key_exclusive,
+            options,
+        )
+        .await
+    }
+
+    pub async fn get_notifications(&self) -> Result<Receiver<Notification>, OxiaError> {
+        self.get_notifications_with_options(vec![]).await
+    }
+
+    pub async fn get_notifications_with_options(
+        &self,
+        options: Vec<GetNotificationOption>,
+    ) -> Result<Receiver<Notification>, OxiaError> {
+        <Self as Client>::get_notifications_with_options(self, options).await
+    }
+
+    pub async fn get_sequence_updates(&self, key: String) -> Result<Receiver<String>, OxiaError> {
+        self.get_sequence_updates_with_options(key, vec![]).await
+    }
+
+    pub async fn get_sequence_updates_with_options(
+        &self,
+        key: String,
+        options: Vec<GetSequenceUpdatesOption>,
+    ) -> Result<Receiver<String>, OxiaError> {
+        <Self as Client>::get_sequence_updates_with_options(self, key, options).await
+    }
+
+    pub async fn shutdown(self) -> Result<(), OxiaError> {
+        <Self as Client>::shutdown(self).await
+    }
+
+    fn get_or_init_batch_manager(
+        &self,
+        batcher: Batcher,
+        key: &str,
+    ) -> Result<(i64, Arc<BatchManager>), OxiaError> {
+        match self.inner.shard_manager.get_shard(&key) {
+            Some(shard_id) => self.get_or_init_batch_manager_with_shard(batcher, shard_id),
+            None => Err(KeyLeaderNotFound(key.to_string())),
+        }
+    }
+
+    fn get_or_init_batch_manager_with_shard(
+        &self,
+        batcher: Batcher,
+        shard_id: i64,
+    ) -> Result<(i64, Arc<BatchManager>), OxiaError> {
+        let closure = || {
+            Arc::new(BatchManager::new(
+                shard_id,
+                batcher.clone(),
+                self.inner.shard_manager.clone(),
+                self.inner.provider_manager.clone(),
+                self.inner.write_stream_manager.clone(),
+                self.inner.options.batch_linger.clone(),
+                self.inner.options.batch_max_size.clone(),
+            ))
+        };
+        let ref_mut = match batcher {
+            Batcher::Read => self
+                .inner
+                .read_batch_manager
+                .entry(shard_id)
+                .or_insert_with(closure),
+            Batcher::Write => self
+                .inner
+                .write_batch_manager
+                .entry(shard_id)
+                .or_insert_with(closure),
+        };
+        Ok((ref_mut.key().clone(), ref_mut.value().clone()))
+    }
+}
+
 #[async_trait]
-impl Client for ClientImpl {
+impl Client for OxiaClient {
     async fn put(&self, key: String, value: Vec<u8>) -> Result<PutResult, OxiaError> {
         self.put_with_options(key, value, vec![]).await
     }
@@ -689,86 +905,6 @@ impl Client for ClientImpl {
         .shutdown()
         .await?;
         Ok(())
-    }
-}
-
-impl ClientImpl {
-    pub async fn new(options: OxiaClientOptions) -> Result<ClientImpl, OxiaError> {
-        let provider_manager = Arc::new(ProviderManager::new());
-        let shard_manager = Arc::new(
-            ShardManager::new(ShardManagerOptions {
-                address: options.service_address.clone(),
-                namespace: options.namespace.clone(),
-                provider_manager: provider_manager.clone(),
-            })
-            .await?,
-        );
-        let write_stream_manager = Arc::new(WriteStreamManager::new(
-            options.namespace.clone(),
-            shard_manager.clone(),
-            provider_manager.clone(),
-        ));
-        let session_manager = Arc::new(SessionManager::new(
-            options.identity.clone(),
-            options.session_timeout,
-            shard_manager.clone(),
-            provider_manager.clone(),
-        ));
-        Ok(ClientImpl {
-            inner: Arc::new(Inner {
-                options,
-                write_stream_manager,
-                provider_manager,
-                shard_manager,
-                session_manager,
-                notification_managers: Arc::new(Mutex::new(Vec::new())),
-                sequence_updates_manager: Arc::new(Mutex::new(Vec::new())),
-                write_batch_manager: DashMap::new(),
-                read_batch_manager: DashMap::new(),
-            }),
-        })
-    }
-
-    fn get_or_init_batch_manager(
-        &self,
-        batcher: Batcher,
-        key: &str,
-    ) -> Result<(i64, Arc<BatchManager>), OxiaError> {
-        match self.inner.shard_manager.get_shard(&key) {
-            Some(shard_id) => self.get_or_init_batch_manager_with_shard(batcher, shard_id),
-            None => Err(KeyLeaderNotFound(key.to_string())),
-        }
-    }
-
-    fn get_or_init_batch_manager_with_shard(
-        &self,
-        batcher: Batcher,
-        shard_id: i64,
-    ) -> Result<(i64, Arc<BatchManager>), OxiaError> {
-        let closure = || {
-            Arc::new(BatchManager::new(
-                shard_id,
-                batcher.clone(),
-                self.inner.shard_manager.clone(),
-                self.inner.provider_manager.clone(),
-                self.inner.write_stream_manager.clone(),
-                self.inner.options.batch_linger.clone(),
-                self.inner.options.batch_max_size.clone(),
-            ))
-        };
-        let ref_mut = match batcher {
-            Batcher::Read => self
-                .inner
-                .read_batch_manager
-                .entry(shard_id)
-                .or_insert_with(closure),
-            Batcher::Write => self
-                .inner
-                .write_batch_manager
-                .entry(shard_id)
-                .or_insert_with(closure),
-        };
-        Ok((ref_mut.key().clone(), ref_mut.value().clone()))
     }
 }
 

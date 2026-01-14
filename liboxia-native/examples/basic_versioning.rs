@@ -1,4 +1,4 @@
-use liboxia::client::{Client, PutOption};
+use liboxia::client::PutOption;
 use liboxia::client_builder::OxiaClientBuilder;
 use tracing::level_filters::LevelFilter;
 
