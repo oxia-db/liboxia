@@ -1,6 +1,6 @@
 [package]
 name = "liboxia"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 
 description = "Liboxia is a Rust library designed for both native Rust applications and for integration with other languages via its C Foreign Function Interface (FFI). It serves as a client SDK for Oxia, a distributed key-value store, enabling robust, asynchronous data operations."
