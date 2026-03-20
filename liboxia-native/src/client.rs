@@ -20,6 +20,7 @@ use crate::shard_manager::{Node, ShardManager, ShardManagerOptions};
 use crate::write_stream_manager::WriteStreamManager;
 use dashmap::DashMap;
 use std::cmp::Ordering;
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -141,6 +142,30 @@ pub enum Notification {
     KeyModified(KeyModified),
     KeyRangeDeleted(KeyRangeDeleted),
     Unknown(),
+}
+
+impl fmt::Display for Notification {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Notification::KeyCreated(c) => write!(
+                f,
+                "KeyCreated(key={}, version_id={:?})",
+                c.key, c.version_id
+            ),
+            Notification::KeyDeleted(d) => write!(f, "KeyDeleted(key={})", d.key),
+            Notification::KeyModified(m) => write!(
+                f,
+                "KeyModified(key={}, version_id={:?})",
+                m.key, m.version_id
+            ),
+            Notification::KeyRangeDeleted(r) => write!(
+                f,
+                "KeyRangeDeleted(key={}, last={:?})",
+                r.key, r.key_range_last
+            ),
+            Notification::Unknown() => write!(f, "Unknown"),
+        }
+    }
 }
 
 impl From<(String, crate::oxia::Notification)> for Notification {
