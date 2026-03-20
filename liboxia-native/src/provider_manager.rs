@@ -3,7 +3,7 @@ use crate::errors::OxiaError::UnexpectedStatus;
 use crate::oxia::oxia_client_client::OxiaClientClient;
 use dashmap::DashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::OnceCell;
 use tonic::transport::Channel;
 
 pub struct ProviderManager {

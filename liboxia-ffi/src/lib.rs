@@ -224,6 +224,126 @@ pub extern "C" fn oxia_put_result_free(result: *mut COxiaPutResult) {
 }
 
 #[no_mangle]
+pub extern "C" fn oxia_client_delete(
+    client: *const OxiaClient,
+    key: *const c_char,
+) -> COxiaError {
+    let rt = get_runtime();
+    let key = unsafe { CStr::from_ptr(key).to_str().unwrap().to_string() };
+    let result = rt.block_on(async {
+        let rust_client = unsafe { &*client };
+        rust_client.0.delete(key).await
+    });
+
+    match result {
+        Ok(_) => COxiaError::Ok,
+        Err(err) => COxiaError::from(err),
+    }
+}
+
+#[repr(C)]
+pub struct COxiaListResult {
+    pub keys: *mut *mut c_char,
+    pub keys_len: usize,
+}
+
+#[no_mangle]
+pub extern "C" fn oxia_client_list(
+    client: *const OxiaClient,
+    min_key_inclusive: *const c_char,
+    max_key_exclusive: *const c_char,
+    result_ptr: *mut *mut COxiaListResult,
+) -> COxiaError {
+    let rt = get_runtime();
+    let min_key = unsafe {
+        CStr::from_ptr(min_key_inclusive)
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    let max_key = unsafe {
+        CStr::from_ptr(max_key_exclusive)
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    let result = rt.block_on(async {
+        let rust_client = unsafe { &*client };
+        rust_client.0.list(min_key, max_key).await
+    });
+
+    match result {
+        Ok(list_result) => {
+            let c_keys: Vec<*mut c_char> = list_result
+                .keys
+                .into_iter()
+                .map(|k| CString::new(k).unwrap().into_raw())
+                .collect();
+            let keys_len = c_keys.len();
+            let keys_ptr = c_keys.as_ptr() as *mut *mut c_char;
+            std::mem::forget(c_keys);
+            let c_result = COxiaListResult {
+                keys: keys_ptr,
+                keys_len,
+            };
+            unsafe {
+                *result_ptr = Box::into_raw(Box::new(c_result));
+            }
+            COxiaError::Ok
+        }
+        Err(err) => COxiaError::from(err),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn oxia_list_result_free(result: *mut COxiaListResult) {
+    if !result.is_null() {
+        let box_result = unsafe { Box::from_raw(result) };
+        if !box_result.keys.is_null() {
+            let keys =
+                unsafe { Vec::from_raw_parts(box_result.keys, box_result.keys_len, box_result.keys_len) };
+            for key in keys {
+                if !key.is_null() {
+                    unsafe {
+                        let _ = CString::from_raw(key);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn oxia_client_delete_range(
+    client: *const OxiaClient,
+    min_key_inclusive: *const c_char,
+    max_key_exclusive: *const c_char,
+) -> COxiaError {
+    let rt = get_runtime();
+    let min_key = unsafe {
+        CStr::from_ptr(min_key_inclusive)
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    let max_key = unsafe {
+        CStr::from_ptr(max_key_exclusive)
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    let result = rt.block_on(async {
+        let rust_client = unsafe { &*client };
+        rust_client.0.delete_range(min_key, max_key).await
+    });
+
+    match result {
+        Ok(_) => COxiaError::Ok,
+        Err(err) => COxiaError::from(err),
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn oxia_get_result_free(result: *mut COxiaGetResult) {
     if !result.is_null() {
         let box_result = unsafe { Box::from_raw(result) };

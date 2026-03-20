@@ -28,6 +28,9 @@ use tonic::codegen::tokio_stream::StreamExt;
 use tonic::{async_trait, Request};
 
 pub enum PutOption {
+    /// Only succeed if the record does not already exist (equivalent to ExpectVersionId(-1))
+    ExpectedRecordNotExists(),
+    /// Only succeed if the current version matches
     ExpectVersionId(i64),
     PartitionKey(String),
     SequenceKeyDelta(Vec<u64>),
@@ -54,7 +57,8 @@ pub enum DeleteRangeOption {
 pub enum GetOption {
     ComparisonType(KeyComparisonType),
     PartitionKey(String),
-    IncludeValue(),
+    /// Include the value in the response (default: true)
+    IncludeValue(bool),
     UseIndex(String),
 }
 
@@ -109,25 +113,25 @@ pub enum GetSequenceUpdatesOption {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyCreated {
-    key: String,
-    version_id: Option<i64>,
+    pub key: String,
+    pub version_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyDeleted {
-    key: String,
+    pub key: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyModified {
-    key: String,
-    version_id: Option<i64>,
+    pub key: String,
+    pub version_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyRangeDeleted {
-    key: String,
-    key_range_last: Option<String>,
+    pub key: String,
+    pub key_range_last: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -166,6 +170,7 @@ impl From<(String, crate::oxia::Notification)> for Notification {
 }
 
 // Internal trait for client operations - not exposed to users
+#[allow(dead_code)]
 #[async_trait]
 trait Client: Send + Sync + Clone {
     async fn put(&self, key: String, value: Vec<u8>) -> Result<PutResult, OxiaError>;
@@ -574,11 +579,24 @@ impl Client for OxiaClient {
                     batch_manager.clone(),
                 ));
             }
-            let mut results = join_set
-                .join_all()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<GetResult>, OxiaError>>()?;
+            let all_results: Vec<Result<GetResult, OxiaError>> =
+                join_set.join_all().await;
+            // Separate successes and errors
+            let mut results: Vec<GetResult> = Vec::new();
+            let mut last_error: Option<OxiaError> = None;
+            for result in all_results {
+                match result {
+                    Ok(get_result) => results.push(get_result),
+                    Err(OxiaError::KeyNotFound()) => {
+                        // KeyNotFound from some shards is expected for non-partition queries
+                        last_error = Some(KeyNotFound());
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            if results.is_empty() {
+                return Err(last_error.unwrap_or(KeyNotFound()));
+            }
             results.sort();
             let index = match operation.comparison_type {
                 KeyComparisonType::Equal
