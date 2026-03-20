@@ -28,6 +28,7 @@ pub struct OxiaClientBuilder {
     identity: Option<String>,
     batch_linger: Option<Duration>,
     batch_max_size: Option<u32>,
+    max_requests_per_batch: Option<u32>,
     session_timeout: Option<Duration>,
     request_timeout: Option<Duration>,
 }
@@ -62,6 +63,11 @@ impl OxiaClientBuilder {
         self
     }
 
+    pub fn max_requests_per_batch(mut self, max_requests_per_batch: u32) -> Self {
+        self.max_requests_per_batch = Some(max_requests_per_batch);
+        self
+    }
+
     pub fn session_timeout(mut self, session_timeout: Duration) -> Self {
         self.session_timeout = Some(session_timeout);
         self
@@ -88,6 +94,9 @@ impl OxiaClientBuilder {
         }
         if let Some(batch_max_size) = self.batch_max_size {
             options.batch_max_size = batch_max_size;
+        }
+        if let Some(max_requests_per_batch) = self.max_requests_per_batch {
+            options.max_requests_per_batch = max_requests_per_batch;
         }
         if let Some(session_timeout) = self.session_timeout {
             options.session_timeout = session_timeout;
