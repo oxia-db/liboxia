@@ -50,11 +50,10 @@ impl WriteStream {
         let (tx, rx) = oneshot::channel();
         let inflight = Inflight { future: tx };
         inner_guard.inflight_deque.push_back(inflight);
-        let send_result = inner_guard.tx.send(request);
-        if send_result.is_err() {
+        if let Err(err) = inner_guard.tx.send(request) {
             inner_guard.alive = false;
             inner_guard.fail_inflight();
-            return Err(UnexpectedStatus(send_result.unwrap_err().to_string()));
+            return Err(UnexpectedStatus(err.to_string()));
         }
         drop(inner_guard);
         let mut guard = self.defer_response.lock().await;
@@ -74,11 +73,10 @@ impl WriteStream {
         let (tx, rx) = oneshot::channel();
         let inflight = Inflight { future: tx };
         inner_guard.inflight_deque.push_back(inflight);
-        let send_result = inner_guard.tx.send(request);
-        if send_result.is_err() {
+        if let Err(err) = inner_guard.tx.send(request) {
             inner_guard.alive = false;
             inner_guard.fail_inflight();
-            return Err(UnexpectedStatus(send_result.unwrap_err().to_string()));
+            return Err(UnexpectedStatus(err.to_string()));
         }
         drop(inner_guard);
         rx.await.map_err(|err| UnexpectedStatus(err.to_string()))
@@ -86,16 +84,8 @@ impl WriteStream {
 
     pub(crate) async fn get_defer_response(&self) -> Option<Result<WriteResponse, OxiaError>> {
         let mut guard = self.defer_response.lock().await;
-        let option = guard.take();
-        if option.is_none() {
-            return None;
-        }
-        Some(
-            option
-                .unwrap()
-                .await
-                .map_err(|err| UnexpectedStatus(err.to_string())),
-        )
+        let rx = guard.take()?;
+        Some(rx.await.map_err(|err| UnexpectedStatus(err.to_string())))
     }
 
     pub(crate) fn new(tx: UnboundedSender<WriteRequest>) -> Self {
@@ -164,9 +154,8 @@ async fn handle_response(
                             warn!("Receive an empty write inflight, discard it.");
                             continue
                         }
-                        let callback_result = inflight.unwrap().future.send(write_response); // it shouldn't happen
-                        if callback_result.is_err() {
-                            warn!("Send callback response failed. error: {:?}", callback_result.unwrap_err());
+                        if let Err(err) = inflight.unwrap().future.send(write_response) {
+                            warn!("Send callback response failed. error: {:?}", err);
                         }
                     }
                     Err(_status) => {

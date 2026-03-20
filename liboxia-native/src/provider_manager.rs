@@ -18,7 +18,7 @@ impl ProviderManager {
         let once_cell = self
             .providers
             .entry(address.clone())
-            .or_insert_with(|| OnceCell::new());
+            .or_default();
         let client = once_cell
             .get_or_try_init(|| async {
                 let client = OxiaClientClient::connect(address)

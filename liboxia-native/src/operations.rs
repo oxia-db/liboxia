@@ -257,7 +257,7 @@ impl Clone for GetOperation {
             partition_key: self.partition_key.clone(),
             key: self.key.clone(),
             include_value: self.include_value,
-            comparison_type: self.comparison_type.clone(),
+            comparison_type: self.comparison_type,
             secondary_index_name: self.secondary_index_name.clone(),
         }
     }

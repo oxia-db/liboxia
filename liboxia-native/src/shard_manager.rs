@@ -157,7 +157,7 @@ impl ShardManager {
     pub fn get_shard(&self, key: &str) -> Option<i64> {
         let code = xxhash_rust::xxh32::xxh32(key.as_bytes(), 0);
         for entry in self.inner.current_assignments.iter() {
-            match entry.shard_boundaries.unwrap() {
+            match entry.shard_boundaries.as_ref().unwrap() {
                 ShardBoundaries::Int32HashRange(range) => {
                     if range.min_hash_inclusive <= code && code <= range.max_hash_inclusive {
                         return Some(entry.shard);
@@ -185,7 +185,7 @@ impl ShardManager {
     pub fn get_shard_leader(&self, key: &str) -> Option<Node> {
         let code = xxhash_rust::xxh32::xxh32(key.as_bytes(), 0);
         for entry in self.inner.current_assignments.iter() {
-            match entry.shard_boundaries.unwrap() {
+            match entry.shard_boundaries.as_ref().unwrap() {
                 ShardBoundaries::Int32HashRange(range) => {
                     if range.min_hash_inclusive <= code && code <= range.max_hash_inclusive {
                         return Some(Node {

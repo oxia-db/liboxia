@@ -1,3 +1,5 @@
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::ffi::{c_char, CStr, CString};
 use std::slice;
 use std::sync::OnceLock;

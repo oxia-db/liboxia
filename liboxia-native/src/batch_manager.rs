@@ -58,6 +58,7 @@ impl Drop for BatchManager {
 }
 
 impl BatchManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shard_id: i64,
         batcher: Batcher,
@@ -107,6 +108,7 @@ impl BatchManager {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_batcher(
     context: CancellationToken,
     mut rx: UnboundedReceiver<Operation>,

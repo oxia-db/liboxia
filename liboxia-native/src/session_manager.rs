@@ -189,7 +189,7 @@ impl SessionManager {
         let session_cell = self
             .sessions
             .entry(shard_id)
-            .or_insert_with(|| OnceCell::new());
+            .or_default();
         let session = session_cell
             .get_or_try_init(|| async {
                 match self.shard_manager.get_leader(shard_id) {
