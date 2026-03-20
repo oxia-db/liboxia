@@ -1462,3 +1462,137 @@ async fn test_multiple_secondary_indexes() {
         .unwrap();
     client.shutdown().await.unwrap();
 }
+
+// ============================================================
+// List and scan partial ranges
+// ============================================================
+
+#[tokio::test]
+async fn test_list_partial_range() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    for key in &["pr/a", "pr/b", "pr/c", "pr/d", "pr/e"] {
+        client.put(key.to_string(), b"v".to_vec()).await.unwrap();
+    }
+
+    // List only a subset of the range
+    let result = client
+        .list("pr/b".to_string(), "pr/d".to_string())
+        .await
+        .unwrap();
+    assert_eq!(result.keys.len(), 2);
+    assert!(result.keys.contains(&"pr/b".to_string()));
+    assert!(result.keys.contains(&"pr/c".to_string()));
+
+    client
+        .delete_range("pr/".to_string(), "pr/~".to_string())
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+}
+
+// ============================================================
+// Put and immediately get - verify consistency
+// ============================================================
+
+#[tokio::test]
+async fn test_read_your_writes() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    for i in 0..50 {
+        let key = format!("ryw/{}", i);
+        let value = format!("value-{}", i);
+        client
+            .put(key.clone(), value.clone().into_bytes())
+            .await
+            .unwrap();
+        let result = client.get(key).await.unwrap();
+        assert_eq!(result.value, Some(value.into_bytes()));
+    }
+
+    client
+        .delete_range("ryw/".to_string(), "ryw/~".to_string())
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+}
+
+// ============================================================
+// Multiple clients operating concurrently
+// ============================================================
+
+#[tokio::test]
+async fn test_multiple_clients() {
+    let (_container, address) = start_oxia().await;
+    let client1 = new_client(&address).await;
+    let client2 = new_client(&address).await;
+
+    // Client 1 writes
+    client1
+        .put("mc/key1".to_string(), b"from-client-1".to_vec())
+        .await
+        .unwrap();
+
+    // Client 2 reads
+    let result = client2.get("mc/key1".to_string()).await.unwrap();
+    assert_eq!(result.value, Some(b"from-client-1".to_vec()));
+
+    // Client 2 writes
+    client2
+        .put("mc/key2".to_string(), b"from-client-2".to_vec())
+        .await
+        .unwrap();
+
+    // Client 1 reads
+    let result = client1.get("mc/key2".to_string()).await.unwrap();
+    assert_eq!(result.value, Some(b"from-client-2".to_vec()));
+
+    client1
+        .delete_range("mc/".to_string(), "mc/~".to_string())
+        .await
+        .unwrap();
+    client1.shutdown().await.unwrap();
+    client2.shutdown().await.unwrap();
+}
+
+// ============================================================
+// CAS (Compare-And-Swap) loop pattern
+// ============================================================
+
+#[tokio::test]
+async fn test_cas_loop() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    // Create initial record
+    let initial = client
+        .put("cas/counter".to_string(), b"0".to_vec())
+        .await
+        .unwrap();
+
+    // Simulate a CAS loop: read-modify-write with version check
+    let mut current_version = initial.version.version_id;
+    for i in 1..=5 {
+        let result = client
+            .put_with_options(
+                "cas/counter".to_string(),
+                format!("{}", i).into_bytes(),
+                vec![PutOption::ExpectVersionId(current_version)],
+            )
+            .await
+            .unwrap();
+        current_version = result.version.version_id;
+    }
+
+    // Verify final value
+    let final_result = client.get("cas/counter".to_string()).await.unwrap();
+    assert_eq!(final_result.value, Some(b"5".to_vec()));
+
+    client
+        .delete_range("cas/".to_string(), "cas/~".to_string())
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+}
