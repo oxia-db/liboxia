@@ -14,7 +14,7 @@ async fn main() {
         .with_target(false)
         .init();
 
-    let mut client = OxiaClientBuilder::new().build().await.unwrap();
+    let client = OxiaClientBuilder::new().build().await.unwrap();
     let key = String::from("key1");
     let payload = "payload".to_string().into_bytes();
 
@@ -27,13 +27,13 @@ async fn main() {
         "put the ephemeral record. key {:?} value {:?} version {:?}",
         put_result.key, payload, put_result.version
     );
-    // close the client
+    // close the client (this closes the session, which should delete ephemeral records)
     client.shutdown().await.unwrap();
 
-    // create a new client
-    client = OxiaClientBuilder::new().build().await.unwrap();
-    let result = client.get(key.clone()).await;
+    // create a new client and verify the ephemeral record is gone
+    let client2 = OxiaClientBuilder::new().build().await.unwrap();
+    let result = client2.get(key.clone()).await;
     info!("get the value again. error: {:?}", result.unwrap_err());
 
-    client.shutdown().await.unwrap();
+    client2.shutdown().await.unwrap();
 }

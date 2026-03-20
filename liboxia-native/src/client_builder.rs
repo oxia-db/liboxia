@@ -4,6 +4,23 @@ use crate::client_options::OxiaClientOptions;
 use crate::errors::OxiaError;
 use std::time::Duration;
 
+/// Builder for creating an [`OxiaClient`] with custom configuration.
+///
+/// # Example
+/// ```no_run
+/// # async fn example() {
+/// use liboxia::client_builder::OxiaClientBuilder;
+/// use std::time::Duration;
+///
+/// let client = OxiaClientBuilder::new()
+///     .service_address("localhost:6648".to_string())
+///     .namespace("my-namespace".to_string())
+///     .session_timeout(Duration::from_secs(30))
+///     .build()
+///     .await
+///     .unwrap();
+/// # }
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct OxiaClientBuilder {
     service_address: Option<String>,

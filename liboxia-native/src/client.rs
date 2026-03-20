@@ -27,45 +27,70 @@ use tokio::task::JoinSet;
 use tonic::codegen::tokio_stream::StreamExt;
 use tonic::{async_trait, Request};
 
+/// Options for put operations.
 pub enum PutOption {
-    /// Only succeed if the record does not already exist (equivalent to ExpectVersionId(-1))
+    /// Only succeed if the record does not already exist (equivalent to ExpectVersionId(-1)).
     ExpectedRecordNotExists(),
-    /// Only succeed if the current version matches
+    /// Only succeed if the current version matches the specified version ID (CAS operation).
     ExpectVersionId(i64),
+    /// Override partition routing. Records with the same partition key are co-located on the same shard.
     PartitionKey(String),
+    /// Server-assigned atomic sequential keys. The key will get added suffixes based on
+    /// adding the delta to the current highest key with the same prefix.
     SequenceKeyDelta(Vec<u64>),
+    /// Associate secondary indexes with the record for alternative query paths.
     SecondaryIndexes(Vec<SecondaryIndex>),
+    /// Create an ephemeral record that is automatically deleted when the client's session
+    /// is closed or expires.
     Ephemeral(),
 }
 
+/// The result of a put operation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PutResult {
+    /// The key of the stored record. May differ from the requested key when using sequence deltas.
     pub key: String,
+    /// The version metadata of the stored record.
     pub version: Version,
 }
 
+/// Options for delete operations.
 pub enum DeleteOption {
+    /// Override partition routing.
     PartitionKey(String),
+    /// Only delete if the current version matches (conditional delete).
     ExpectVersionId(i64),
+    /// Only delete if the record does not exist (no-op check).
     RecordDoesNotExist(),
 }
 
+/// Options for delete range operations.
 pub enum DeleteRangeOption {
+    /// Override partition routing.
     PartitionKey(String),
 }
 
+/// Options for get operations.
 pub enum GetOption {
+    /// Key comparison type: Equal (default), Floor, Ceiling, Lower, Higher.
     ComparisonType(KeyComparisonType),
+    /// Override partition routing.
     PartitionKey(String),
-    /// Include the value in the response (default: true)
+    /// Whether to include the value in the response (default: true).
+    /// Set to false for metadata-only queries.
     IncludeValue(bool),
+    /// Query a secondary index instead of the primary key space.
     UseIndex(String),
 }
 
+/// The result of a get operation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GetResult {
+    /// The key of the record. May differ from the requested key when using comparison queries.
     pub key: String,
+    /// The value of the record. None if the value was not requested or the record has no value.
     pub value: Option<Vec<u8>>,
+    /// The version metadata of the record.
     pub version: Version,
 }
 impl Eq for GetResult {}
@@ -82,32 +107,47 @@ impl Ord for GetResult {
     }
 }
 
+/// Options for list operations.
 pub enum ListOption {
+    /// Override partition routing.
     PartitionKey(String),
+    /// Query a secondary index instead of the primary key space.
     UseIndex(String),
 }
 
+/// The result of a list operation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListResult {
+    /// The keys found within the specified range.
     pub keys: Vec<String>,
 }
 
+/// Options for range scan operations.
 pub enum RangeScanOption {
+    /// Override partition routing.
     PartitionKey(String),
+    /// Query a secondary index instead of the primary key space.
     UseIndex(String),
 }
 
+/// The result of a range scan operation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RangeScanResult {
+    /// The records found within the specified range, including keys, values, and versions.
     pub records: Vec<GetResult>,
 }
 
+/// Options for notification subscriptions.
 pub enum GetNotificationOption {
+    /// Buffer size for the notification channel (default: 100).
     BufferSize(usize),
 }
 
+/// Options for sequence update subscriptions.
 pub enum GetSequenceUpdatesOption {
+    /// Required: the partition key for the sequence. Must be specified.
     PartitionKey(String),
+    /// Buffer size for the sequence updates channel (default: 100).
     BufferSize(usize),
 }
 
@@ -134,12 +174,18 @@ pub struct KeyRangeDeleted {
     pub key_range_last: Option<String>,
 }
 
+/// A change notification received from Oxia.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notification {
+    /// A new key was created.
     KeyCreated(KeyCreated),
+    /// A key was deleted.
     KeyDeleted(KeyDeleted),
+    /// An existing key was modified.
     KeyModified(KeyModified),
+    /// A range of keys was deleted.
     KeyRangeDeleted(KeyRangeDeleted),
+    /// An unknown notification type was received.
     Unknown(),
 }
 
