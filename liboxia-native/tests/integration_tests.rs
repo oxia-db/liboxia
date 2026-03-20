@@ -1294,3 +1294,162 @@ async fn test_range_scan_with_partition_key() {
         .unwrap();
     client.shutdown().await.unwrap();
 }
+
+// ============================================================
+// Stress / throughput test
+// ============================================================
+
+#[tokio::test]
+async fn test_high_throughput_writes() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let num_ops = 100;
+    let mut handles = Vec::new();
+
+    // Flood with concurrent put operations
+    for i in 0..num_ops {
+        let c = client.clone();
+        handles.push(tokio::spawn(async move {
+            c.put(
+                format!("stress/{:04}", i),
+                format!("val-{}", i).into_bytes(),
+            )
+            .await
+        }));
+    }
+
+    let mut success_count = 0;
+    for handle in handles {
+        if handle.await.unwrap().is_ok() {
+            success_count += 1;
+        }
+    }
+    assert_eq!(success_count, num_ops, "All puts should succeed");
+
+    // Verify all keys exist
+    let list = client
+        .list("stress/".to_string(), "stress/~".to_string())
+        .await
+        .unwrap();
+    assert_eq!(list.keys.len(), num_ops);
+
+    // Range scan all
+    let scan = client
+        .range_scan("stress/".to_string(), "stress/~".to_string())
+        .await
+        .unwrap();
+    assert_eq!(scan.records.len(), num_ops);
+
+    // Flood with concurrent delete operations
+    let mut del_handles = Vec::new();
+    for i in 0..num_ops {
+        let c = client.clone();
+        del_handles.push(tokio::spawn(async move {
+            c.delete(format!("stress/{:04}", i)).await
+        }));
+    }
+    for handle in del_handles {
+        handle.await.unwrap().unwrap();
+    }
+
+    // Verify all keys deleted
+    let list = client
+        .list("stress/".to_string(), "stress/~".to_string())
+        .await
+        .unwrap();
+    assert_eq!(list.keys.len(), 0);
+
+    client.shutdown().await.unwrap();
+}
+
+// ============================================================
+// Notification Display test
+// ============================================================
+
+#[tokio::test]
+async fn test_notification_display() {
+    let created = Notification::KeyCreated(KeyCreated {
+        key: "test/key".to_string(),
+        version_id: Some(42),
+    });
+    assert!(format!("{}", created).contains("test/key"));
+    assert!(format!("{}", created).contains("42"));
+
+    let deleted = Notification::KeyDeleted(KeyDeleted {
+        key: "test/key".to_string(),
+    });
+    assert!(format!("{}", deleted).contains("test/key"));
+
+    let modified = Notification::KeyModified(KeyModified {
+        key: "test/key".to_string(),
+        version_id: Some(43),
+    });
+    assert!(format!("{}", modified).contains("test/key"));
+
+    let unknown = Notification::Unknown();
+    assert_eq!(format!("{}", unknown), "Unknown");
+}
+
+// ============================================================
+// Multiple secondary indexes per record
+// ============================================================
+
+#[tokio::test]
+async fn test_multiple_secondary_indexes() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    // Put a record with multiple secondary indexes
+    client
+        .put_with_options(
+            "multi-idx/record1".to_string(),
+            b"some-data".to_vec(),
+            vec![PutOption::SecondaryIndexes(vec![
+                SecondaryIndex {
+                    index_name: "by-type".to_string(),
+                    secondary_key: "document".to_string(),
+                },
+                SecondaryIndex {
+                    index_name: "by-status".to_string(),
+                    secondary_key: "active".to_string(),
+                },
+            ])],
+        )
+        .await
+        .unwrap();
+
+    // Query via first secondary index
+    let list1 = client
+        .list_with_options(
+            "d".to_string(),
+            "e".to_string(),
+            vec![ListOption::UseIndex("by-type".to_string())],
+        )
+        .await
+        .unwrap();
+    assert!(
+        !list1.keys.is_empty(),
+        "Should find record via by-type index"
+    );
+
+    // Query via second secondary index
+    let list2 = client
+        .list_with_options(
+            "a".to_string(),
+            "b".to_string(),
+            vec![ListOption::UseIndex("by-status".to_string())],
+        )
+        .await
+        .unwrap();
+    assert!(
+        !list2.keys.is_empty(),
+        "Should find record via by-status index"
+    );
+
+    client
+        .delete_range("multi-idx/".to_string(), "multi-idx/~".to_string())
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+}
