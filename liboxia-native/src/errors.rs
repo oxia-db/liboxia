@@ -34,4 +34,7 @@ pub enum OxiaError {
 
     #[error("illegal argument: {0}")]
     IllegalArgument(String),
+
+    #[error("request timeout")]
+    RequestTimeout(),
 }

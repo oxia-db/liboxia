@@ -21,6 +21,7 @@ use crate::write_stream_manager::WriteStreamManager;
 use dashmap::DashMap;
 use std::cmp::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinSet;
@@ -485,6 +486,10 @@ impl OxiaClient {
         };
         Ok((ref_mut.key().clone(), ref_mut.value().clone()))
     }
+
+    fn request_timeout(&self) -> Duration {
+        self.inner.options.request_timeout
+    }
 }
 
 #[async_trait]
@@ -513,8 +518,9 @@ impl Client for OxiaClient {
             operation.session_id = Some(self.inner.session_manager.get_session_id(shard_id).await?)
         }
         batch_manager.add(Operation::Put(operation))?;
-        let put_response = rx
+        let put_response = tokio::time::timeout(self.request_timeout(), rx)
             .await
+            .map_err(|_| OxiaError::RequestTimeout())?
             .map_err(|err| UnexpectedStatus(err.to_string()))??;
         check_status(put_response.status)?;
         Ok(PutResult {
@@ -541,8 +547,9 @@ impl Client for OxiaClient {
             Some(partition_key) => self.get_or_init_batch_manager(Batcher::Write, partition_key)?,
         };
         batch_manager.add(Operation::Delete(operation))?;
-        let response = rx
+        let response = tokio::time::timeout(self.request_timeout(), rx)
             .await
+            .map_err(|_| OxiaError::RequestTimeout())?
             .map_err(|err| UnexpectedStatus(err.to_string()))??;
 
         Ok(check_status(response.status)?)

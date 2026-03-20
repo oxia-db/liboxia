@@ -55,6 +55,7 @@ pub enum COxiaError {
     InternalRetryable = 9,
     Cancelled = 10,
     IllegalArgument = 11,
+    RequestTimeout = 12,
 }
 
 impl From<OxiaError> for COxiaError {
@@ -71,6 +72,7 @@ impl From<OxiaError> for COxiaError {
             OxiaError::InternalRetryable() => COxiaError::InternalRetryable,
             OxiaError::Cancelled() => COxiaError::Cancelled,
             OxiaError::IllegalArgument(_) => COxiaError::IllegalArgument,
+            OxiaError::RequestTimeout() => COxiaError::RequestTimeout,
         }
     }
 }

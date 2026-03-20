@@ -972,3 +972,365 @@ async fn test_large_value() {
         .unwrap();
     client.shutdown().await.unwrap();
 }
+
+// ============================================================
+// Delete non-existent key
+// ============================================================
+
+#[tokio::test]
+async fn test_delete_nonexistent_key() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    // Deleting a key that doesn't exist should succeed (idempotent)
+    let result = client.delete("nonexistent/key123".to_string()).await;
+    // Oxia returns KeyNotFound when deleting non-existent keys
+    assert!(result.is_ok() || matches!(result, Err(OxiaError::KeyNotFound())));
+
+    client.shutdown().await.unwrap();
+}
+
+// ============================================================
+// Multiple sequential operations on same key
+// ============================================================
+
+#[tokio::test]
+async fn test_sequential_operations() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    // Create
+    let r1 = client
+        .put("seq-ops/key".to_string(), b"v1".to_vec())
+        .await
+        .unwrap();
+
+    // Read
+    let get1 = client.get("seq-ops/key".to_string()).await.unwrap();
+    assert_eq!(get1.value, Some(b"v1".to_vec()));
+
+    // Update with version check (CAS)
+    let r2 = client
+        .put_with_options(
+            "seq-ops/key".to_string(),
+            b"v2".to_vec(),
+            vec![PutOption::ExpectVersionId(r1.version.version_id)],
+        )
+        .await
+        .unwrap();
+
+    // Read updated
+    let get2 = client.get("seq-ops/key".to_string()).await.unwrap();
+    assert_eq!(get2.value, Some(b"v2".to_vec()));
+    assert_eq!(get2.version.version_id, r2.version.version_id);
+
+    // Delete with version check
+    client
+        .delete_with_options(
+            "seq-ops/key".to_string(),
+            vec![DeleteOption::ExpectVersionId(r2.version.version_id)],
+        )
+        .await
+        .unwrap();
+
+    // Verify deleted
+    let get3 = client.get("seq-ops/key".to_string()).await;
+    assert!(matches!(get3, Err(OxiaError::KeyNotFound())));
+
+    client.shutdown().await.unwrap();
+}
+
+// ============================================================
+// Range scan with values verification
+// ============================================================
+
+#[tokio::test]
+async fn test_range_scan_values() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let pairs = vec![
+        ("rsv/a", "apple"),
+        ("rsv/b", "banana"),
+        ("rsv/c", "cherry"),
+    ];
+    for (key, val) in &pairs {
+        client
+            .put(key.to_string(), val.as_bytes().to_vec())
+            .await
+            .unwrap();
+    }
+
+    let result = client
+        .range_scan("rsv/".to_string(), "rsv/~".to_string())
+        .await
+        .unwrap();
+
+    assert_eq!(result.records.len(), 3);
+    // Records should be sorted
+    for (i, (key, val)) in pairs.iter().enumerate() {
+        assert_eq!(result.records[i].key, *key);
+        assert_eq!(
+            result.records[i].value,
+            Some(val.as_bytes().to_vec())
+        );
+    }
+
+    client
+        .delete_range("rsv/".to_string(), "rsv/~".to_string())
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+}
+
+// ============================================================
+// Empty value test
+// ============================================================
+
+#[tokio::test]
+async fn test_empty_value() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    client
+        .put("empty-val/key".to_string(), b"".to_vec())
+        .await
+        .unwrap();
+
+    let result = client.get("empty-val/key".to_string()).await.unwrap();
+    // Empty bytes may be represented as None or Some([]) depending on protobuf encoding
+    assert!(
+        result.value.is_none() || result.value == Some(b"".to_vec()),
+        "Expected None or Some([]) for empty value, got: {:?}",
+        result.value
+    );
+
+    client
+        .delete_range("empty-val/".to_string(), "empty-val/~".to_string())
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+}
+
+// ============================================================
+// Special characters in keys
+// ============================================================
+
+#[tokio::test]
+async fn test_special_chars_in_keys() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let special_keys = vec![
+        "special/key-with-dashes",
+        "special/key_with_underscores",
+        "special/key.with.dots",
+        "special/key:with:colons",
+    ];
+
+    for key in &special_keys {
+        client
+            .put(key.to_string(), b"value".to_vec())
+            .await
+            .unwrap();
+    }
+
+    let list = client
+        .list("special/".to_string(), "special/~".to_string())
+        .await
+        .unwrap();
+    assert_eq!(list.keys.len(), special_keys.len());
+
+    client
+        .delete_range("special/".to_string(), "special/~".to_string())
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+}
+
+// ============================================================
+// Notification buffer size option
+// ============================================================
+
+#[tokio::test]
+async fn test_notifications_with_buffer_size() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let mut notification_rx = client
+        .get_notifications_with_options(vec![
+            liboxia::client::GetNotificationOption::BufferSize(10),
+        ])
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    client
+        .put("notif2/key1".to_string(), b"v1".to_vec())
+        .await
+        .unwrap();
+
+    // Should receive at least 1 notification
+    let notification = tokio::time::timeout(Duration::from_secs(5), notification_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(matches!(notification, Notification::KeyCreated(_)));
+
+    client
+        .delete_range("notif2/".to_string(), "notif2/~".to_string())
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+}
+
+// ============================================================
+// Concurrent reads and writes
+// ============================================================
+
+#[tokio::test]
+async fn test_concurrent_read_write() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    // Write initial data
+    for i in 0..10 {
+        client
+            .put(format!("crw/{}", i), format!("initial-{}", i).into_bytes())
+            .await
+            .unwrap();
+    }
+
+    // Concurrently read and write
+    let mut handles = Vec::new();
+
+    // Writers
+    for i in 0..10 {
+        let c = client.clone();
+        handles.push(tokio::spawn(async move {
+            c.put(format!("crw/{}", i), format!("updated-{}", i).into_bytes())
+                .await
+                .unwrap();
+        }));
+    }
+
+    // Readers
+    for i in 0..10 {
+        let c = client.clone();
+        handles.push(tokio::spawn(async move {
+            let _ = c.get(format!("crw/{}", i)).await;
+            // Value should be either initial or updated - both are valid
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    // Verify final state
+    for i in 0..10 {
+        let result = client.get(format!("crw/{}", i)).await.unwrap();
+        assert_eq!(
+            result.value,
+            Some(format!("updated-{}", i).into_bytes())
+        );
+    }
+
+    client
+        .delete_range("crw/".to_string(), "crw/~".to_string())
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+}
+
+// ============================================================
+// Delete range with partition key
+// ============================================================
+
+#[tokio::test]
+async fn test_delete_range_with_partition_key() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let pk = "dr-part".to_string();
+
+    for i in 0..3 {
+        client
+            .put_with_options(
+                format!("drpk/{}", i),
+                format!("val-{}", i).into_bytes(),
+                vec![PutOption::PartitionKey(pk.clone())],
+            )
+            .await
+            .unwrap();
+    }
+
+    // Delete range with partition key
+    client
+        .delete_range_with_options(
+            "drpk/".to_string(),
+            "drpk/~".to_string(),
+            vec![DeleteRangeOption::PartitionKey(pk.clone())],
+        )
+        .await
+        .unwrap();
+
+    // Verify keys are deleted
+    let list = client
+        .list_with_options(
+            "drpk/".to_string(),
+            "drpk/~".to_string(),
+            vec![ListOption::PartitionKey(pk)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.keys.len(), 0);
+
+    client.shutdown().await.unwrap();
+}
+
+// ============================================================
+// Range scan with partition key
+// ============================================================
+
+#[tokio::test]
+async fn test_range_scan_with_partition_key() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let pk = "rspk-part".to_string();
+
+    for i in 0..3 {
+        client
+            .put_with_options(
+                format!("rspk/{}", i),
+                format!("val-{}", i).into_bytes(),
+                vec![PutOption::PartitionKey(pk.clone())],
+            )
+            .await
+            .unwrap();
+    }
+
+    let result = client
+        .range_scan_with_options(
+            "rspk/".to_string(),
+            "rspk/~".to_string(),
+            vec![RangeScanOption::PartitionKey(pk.clone())],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.records.len(), 3);
+
+    client
+        .delete_range_with_options(
+            "rspk/".to_string(),
+            "rspk/~".to_string(),
+            vec![DeleteRangeOption::PartitionKey(pk)],
+        )
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+}
