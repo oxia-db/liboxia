@@ -646,16 +646,18 @@ impl Client for OxiaClient {
                 }
             }
             .clone();
-            get_from_single_shard(operation.clone(), batch_manager).await
+            get_from_single_shard(operation.clone(), batch_manager, self.request_timeout()).await
         } else {
             let mut join_set = JoinSet::new();
             for (shard, _) in self.inner.shard_manager.get_shards_leader() {
                 let (_, batch_manager) = self
                     .get_or_init_batch_manager_with_shard(Batcher::Read, shard)?
                     .clone();
+                let timeout = self.request_timeout();
                 join_set.spawn(get_from_single_shard(
                     operation.clone(),
                     batch_manager.clone(),
+                    timeout,
                 ));
             }
             let all_results: Vec<Result<GetResult, OxiaError>> = join_set.join_all().await;
@@ -824,15 +826,22 @@ impl Client for OxiaClient {
                 Batcher::Write,
                 &operation.partition_key.clone().unwrap(),
             )?;
-            return delete_range_from_single_shard(operation.clone(), batch_manager.clone()).await;
+            return delete_range_from_single_shard(
+                operation.clone(),
+                batch_manager.clone(),
+                self.request_timeout(),
+            )
+            .await;
         }
         let mut join_set = JoinSet::new();
         for (shard, _) in self.inner.shard_manager.get_shards_leader() {
             let (_, batch_manager) =
                 self.get_or_init_batch_manager_with_shard(Batcher::Write, shard)?;
+            let timeout = self.request_timeout();
             join_set.spawn(delete_range_from_single_shard(
                 operation.clone(),
                 batch_manager.clone(),
+                timeout,
             ));
         }
         for result in join_set.join_all().await {
@@ -1076,12 +1085,14 @@ async fn list_from_single_shard(
 async fn delete_range_from_single_shard(
     mut operation: DeleteRangeOperation,
     batch_manager: Arc<BatchManager>,
+    timeout: Duration,
 ) -> Result<(), OxiaError> {
     let (tx, rx) = oneshot::channel();
     operation.callback = Some(tx);
     batch_manager.add(Operation::DeleteRange(operation))?;
-    let response = rx
+    let response = tokio::time::timeout(timeout, rx)
         .await
+        .map_err(|_| OxiaError::RequestTimeout())?
         .map_err(|err| UnexpectedStatus(err.to_string()))??;
     check_status(response.status)
 }
@@ -1090,13 +1101,15 @@ async fn delete_range_from_single_shard(
 async fn get_from_single_shard(
     mut operation: GetOperation,
     batch_manager: Arc<BatchManager>,
+    timeout: Duration,
 ) -> Result<GetResult, OxiaError> {
     let extra_key = operation.key.clone();
     let (tx, rx) = oneshot::channel();
     operation.callback = Some(tx);
     batch_manager.add(Operation::Get(operation))?;
-    let get_response = rx
+    let get_response = tokio::time::timeout(timeout, rx)
         .await
+        .map_err(|_| OxiaError::RequestTimeout())?
         .map_err(|err| UnexpectedStatus(err.to_string()))??;
     check_status(get_response.status)?;
     Ok(GetResult {
