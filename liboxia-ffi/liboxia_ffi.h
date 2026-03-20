@@ -21,6 +21,9 @@ enum COxiaError {
   UnexpectedVersionId = 7,
   SessionDoesNotExist = 8,
   InternalRetryable = 9,
+  Cancelled = 10,
+  IllegalArgument = 11,
+  RequestTimeout = 12,
 };
 typedef int32_t COxiaError;
 
@@ -43,23 +46,41 @@ typedef struct COxiaGetResult {
   int64_t version_id;
 } COxiaGetResult;
 
+typedef struct COxiaListResult {
+  char **keys;
+  uintptr_t keys_len;
+} COxiaListResult;
+
 COxiaError oxia_client_new(struct COxiaClientOptions options, struct OxiaClient **client_ptr);
 
 void oxia_client_free(struct OxiaClient *client);
 
-COxiaError oxia_client_put(struct OxiaClient *client,
+COxiaError oxia_client_put(const struct OxiaClient *client,
                            const char *key,
                            const uint8_t *value,
                            uintptr_t value_len,
                            struct COxiaPutResult **result_ptr);
 
-COxiaError oxia_client_get(struct OxiaClient *client,
+COxiaError oxia_client_get(const struct OxiaClient *client,
                            const char *key,
                            struct COxiaGetResult **result_ptr);
 
 COxiaError oxia_client_shutdown(struct OxiaClient *client);
 
 void oxia_put_result_free(struct COxiaPutResult *result);
+
+COxiaError oxia_client_delete(const struct OxiaClient *client, const char *key);
+
+COxiaError oxia_client_list(const struct OxiaClient *client,
+                            const char *min_key_inclusive,
+                            const char *max_key_exclusive,
+                            struct COxiaListResult **result_ptr);
+
+void oxia_list_result_free(struct COxiaListResult *result);
+
+COxiaError oxia_client_delete_range(const struct OxiaClient *client,
+                                    const char *min_key_inclusive,
+                                    const char *max_key_exclusive);
 
 void oxia_get_result_free(struct COxiaGetResult *result);
 

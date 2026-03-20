@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../liboxia_ffi.h" // Assumes liboxia_ffi.h is in the parent directory
+#include "../liboxia_ffi.h"
 
 int main() {
     printf("Initializing Oxia client...\n");
@@ -20,39 +20,64 @@ int main() {
     }
     printf("Client created successfully.\n");
 
-    const char* key = "my_key";
-    const char* value = "hello_oxia";
-    COxiaPutResult* put_result = NULL;
-
-    // 3. Perform the Put operation
-    COxiaError err_put = oxia_client_put(client, key, (const uint8_t*)value, strlen(value), &put_result);
-    if (err_put != Ok) {
-        printf("Put failed. Error code: %d\n", err_put);
-    } else {
-        printf("Put successful. Key: %s, Version ID: %lld\n", put_result->key, put_result->version_id);
+    // 3. Put multiple keys
+    const char* keys[] = {"example/key1", "example/key2", "example/key3"};
+    const char* values[] = {"hello", "world", "oxia"};
+    for (int i = 0; i < 3; i++) {
+        COxiaPutResult* put_result = NULL;
+        COxiaError err_put = oxia_client_put(client, keys[i],
+            (const uint8_t*)values[i], strlen(values[i]), &put_result);
+        if (err_put != Ok) {
+            printf("Put failed for %s. Error code: %d\n", keys[i], err_put);
+        } else {
+            printf("Put successful. Key: %s, Version ID: %lld\n",
+                   put_result->key, put_result->version_id);
+            oxia_put_result_free(put_result);
+        }
     }
 
-    // Free the memory for the Put result
-    if (put_result != NULL) {
-        oxia_put_result_free(put_result);
-    }
-
-    // 4. Perform the Get operation
+    // 4. Get a key
     COxiaGetResult* get_result = NULL;
-    COxiaError err_get = oxia_client_get(client, key, &get_result);
+    COxiaError err_get = oxia_client_get(client, "example/key1", &get_result);
     if (err_get != Ok) {
         printf("Get failed. Error code: %d\n", err_get);
     } else {
-        printf("Get successful. Key: %s, Value: %s, Version ID: %lld\n",
-               get_result->key, (const char*)get_result->value, get_result->version_id);
-    }
-
-    // Free the memory for the Get result
-    if (get_result != NULL) {
+        printf("Get successful. Key: %s, Value: %.*s, Version ID: %lld\n",
+               get_result->key, (int)get_result->value_len,
+               (const char*)get_result->value, get_result->version_id);
         oxia_get_result_free(get_result);
     }
 
-    // 5. Shutdown the client
+    // 5. List keys in range
+    COxiaListResult* list_result = NULL;
+    COxiaError err_list = oxia_client_list(client, "example/", "example/~", &list_result);
+    if (err_list != Ok) {
+        printf("List failed. Error code: %d\n", err_list);
+    } else {
+        printf("List successful. Found %zu keys:\n", list_result->keys_len);
+        for (size_t i = 0; i < list_result->keys_len; i++) {
+            printf("  - %s\n", list_result->keys[i]);
+        }
+        oxia_list_result_free(list_result);
+    }
+
+    // 6. Delete a single key
+    COxiaError err_del = oxia_client_delete(client, "example/key1");
+    if (err_del != Ok) {
+        printf("Delete failed. Error code: %d\n", err_del);
+    } else {
+        printf("Delete successful for example/key1\n");
+    }
+
+    // 7. Delete range
+    COxiaError err_del_range = oxia_client_delete_range(client, "example/", "example/~");
+    if (err_del_range != Ok) {
+        printf("Delete range failed. Error code: %d\n", err_del_range);
+    } else {
+        printf("Delete range successful for example/*\n");
+    }
+
+    // 8. Shutdown the client
     COxiaError err_shutdown = oxia_client_shutdown(client);
     if (err_shutdown != Ok) {
         printf("Client shutdown failed. Error code: %d\n", err_shutdown);
