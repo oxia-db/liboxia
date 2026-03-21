@@ -157,10 +157,12 @@ impl ShardManager {
     pub fn get_shard(&self, key: &str) -> Option<i64> {
         let code = xxhash_rust::xxh32::xxh32(key.as_bytes(), 0);
         for entry in self.inner.current_assignments.iter() {
-            match entry.shard_boundaries.unwrap() {
-                ShardBoundaries::Int32HashRange(range) => {
-                    if range.min_hash_inclusive <= code && code <= range.max_hash_inclusive {
-                        return Some(entry.shard);
+            if let Some(boundaries) = entry.shard_boundaries.as_ref() {
+                match boundaries {
+                    ShardBoundaries::Int32HashRange(range) => {
+                        if range.min_hash_inclusive <= code && code <= range.max_hash_inclusive {
+                            return Some(entry.shard);
+                        }
                     }
                 }
             }
@@ -168,7 +170,6 @@ impl ShardManager {
         None
     }
 
-    // todo: consider iterator to avoid clone
     pub fn get_shards_leader(&self) -> HashMap<i64, Node> {
         let mut map = HashMap::with_capacity(self.inner.current_assignments.len());
         for item in self.inner.current_assignments.iter() {
@@ -185,12 +186,14 @@ impl ShardManager {
     pub fn get_shard_leader(&self, key: &str) -> Option<Node> {
         let code = xxhash_rust::xxh32::xxh32(key.as_bytes(), 0);
         for entry in self.inner.current_assignments.iter() {
-            match entry.shard_boundaries.unwrap() {
-                ShardBoundaries::Int32HashRange(range) => {
-                    if range.min_hash_inclusive <= code && code <= range.max_hash_inclusive {
-                        return Some(Node {
-                            service_address: ensure_protocol(entry.leader.clone()),
-                        });
+            if let Some(boundaries) = entry.shard_boundaries.as_ref() {
+                match boundaries {
+                    ShardBoundaries::Int32HashRange(range) => {
+                        if range.min_hash_inclusive <= code && code <= range.max_hash_inclusive {
+                            return Some(Node {
+                                service_address: ensure_protocol(entry.leader.clone()),
+                            });
+                        }
                     }
                 }
             }
