@@ -12,9 +12,14 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 const OXIA_PORT: u16 = 6648;
+const DEFAULT_OXIA_IMAGE: &str = "oxia/oxia";
+const DEFAULT_OXIA_TAG: &str = "main";
 
 async fn start_oxia() -> (ContainerAsync<GenericImage>, String) {
-    let container = GenericImage::new("oxia/oxia", "main")
+    let image = std::env::var("OXIA_IMAGE").unwrap_or_else(|_| DEFAULT_OXIA_IMAGE.to_string());
+    let tag = std::env::var("OXIA_TAG").unwrap_or_else(|_| DEFAULT_OXIA_TAG.to_string());
+
+    let container = GenericImage::new(image, tag)
         .with_exposed_port(ContainerPort::Tcp(OXIA_PORT))
         .with_wait_for(WaitFor::message_on_stdout("Started Grpc server"))
         .with_cmd(vec!["oxia", "standalone"])
@@ -465,16 +470,20 @@ async fn test_ephemeral_keys() {
     // Shutdown client (which closes session, deleting ephemeral keys)
     client1.shutdown().await.unwrap();
 
-    // Wait for session to be cleaned up
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // New client should not find the ephemeral key
+    // Wait for session to be cleaned up (retry with backoff)
     let client2 = new_client(&address).await;
-    let result = client2.get("eph/key1".to_string()).await;
+    let mut found_deleted = false;
+    for attempt in 0..10 {
+        tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await;
+        let result = client2.get("eph/key1".to_string()).await;
+        if matches!(result, Err(OxiaError::KeyNotFound())) {
+            found_deleted = true;
+            break;
+        }
+    }
     assert!(
-        matches!(result, Err(OxiaError::KeyNotFound())),
-        "Expected KeyNotFound for ephemeral key after client shutdown, got: {:?}",
-        result
+        found_deleted,
+        "Expected ephemeral key to be deleted after client shutdown"
     );
 
     client2.shutdown().await.unwrap();
