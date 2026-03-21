@@ -218,10 +218,8 @@ impl WriteBatch {
         }
         match self.write_stream_manager.write(write_request).await {
             Ok(response) => {
-                for (mut operation, put_response) in self
-                    .put_inflight
-                    .drain(..)
-                    .zip(response.puts.into_iter())
+                for (mut operation, put_response) in
+                    self.put_inflight.drain(..).zip(response.puts.into_iter())
                 {
                     operation.complete(put_response);
                 }

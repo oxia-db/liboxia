@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use futures::TryFutureExt;
 use log::{info, warn};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc};
+use std::sync::Arc;
 use task::JoinHandle;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;

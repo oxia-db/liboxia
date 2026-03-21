@@ -268,7 +268,7 @@ pub(crate) struct Inner {
 }
 
 /// The Oxia client for interacting with the Oxia distributed key-value store.
-/// 
+///
 /// This is the main client struct that users should use to interact with Oxia.
 /// It can be easily stored in other structs and cloned efficiently.
 #[derive(Clone)]
@@ -579,8 +579,7 @@ impl Client for OxiaClient {
                     batch_manager.clone(),
                 ));
             }
-            let all_results: Vec<Result<GetResult, OxiaError>> =
-                join_set.join_all().await;
+            let all_results: Vec<Result<GetResult, OxiaError>> = join_set.join_all().await;
             // Separate successes and errors
             let mut results: Vec<GetResult> = Vec::new();
             let mut last_error: Option<OxiaError> = None;
@@ -665,8 +664,13 @@ impl Client for OxiaClient {
         min_key_inclusive: String,
         max_key_exclusive: String,
     ) -> Result<RangeScanResult, OxiaError> {
-        <Self as Client>::range_scan_with_options(self, min_key_inclusive, max_key_exclusive, vec![])
-            .await
+        <Self as Client>::range_scan_with_options(
+            self,
+            min_key_inclusive,
+            max_key_exclusive,
+            vec![],
+        )
+        .await
     }
 
     async fn range_scan_with_options(
@@ -718,8 +722,13 @@ impl Client for OxiaClient {
         min_key_inclusive: String,
         max_key_exclusive: String,
     ) -> Result<(), OxiaError> {
-        <Self as Client>::delete_range_with_options(self, min_key_inclusive, max_key_exclusive, vec![])
-            .await
+        <Self as Client>::delete_range_with_options(
+            self,
+            min_key_inclusive,
+            max_key_exclusive,
+            vec![],
+        )
+        .await
     }
 
     async fn delete_range_with_options(

@@ -1,20 +1,20 @@
+mod address;
+mod batch;
+mod batch_manager;
 pub mod client;
 pub mod client_builder;
 pub mod client_options;
 pub mod errors;
-mod shard_manager;
-mod batch;
-mod operations;
-mod provider_manager;
-mod write_stream_manager;
-mod write_stream;
-mod batch_manager;
-mod address;
-mod session_manager;
-mod status;
 mod key;
 mod notification_manager;
+mod operations;
+mod provider_manager;
 mod sequence_updates_manager;
+mod session_manager;
+mod shard_manager;
+mod status;
+mod write_stream;
+mod write_stream_manager;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 pub mod oxia {

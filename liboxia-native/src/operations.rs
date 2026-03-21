@@ -43,9 +43,7 @@ impl From<Vec<PutOption>> for PutOperation {
         let mut operation = PutOperation::default();
         for option in options {
             match option {
-                PutOption::ExpectedRecordNotExists() => {
-                    operation.expected_version_id = Some(-1)
-                }
+                PutOption::ExpectedRecordNotExists() => operation.expected_version_id = Some(-1),
                 PutOption::ExpectVersionId(expected_version_id) => {
                     operation.expected_version_id = Some(expected_version_id)
                 }

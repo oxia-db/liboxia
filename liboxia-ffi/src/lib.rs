@@ -224,10 +224,7 @@ pub extern "C" fn oxia_put_result_free(result: *mut COxiaPutResult) {
 }
 
 #[no_mangle]
-pub extern "C" fn oxia_client_delete(
-    client: *const OxiaClient,
-    key: *const c_char,
-) -> COxiaError {
+pub extern "C" fn oxia_client_delete(client: *const OxiaClient, key: *const c_char) -> COxiaError {
     let rt = get_runtime();
     let key = unsafe { CStr::from_ptr(key).to_str().unwrap().to_string() };
     let result = rt.block_on(async {
@@ -300,8 +297,9 @@ pub extern "C" fn oxia_list_result_free(result: *mut COxiaListResult) {
     if !result.is_null() {
         let box_result = unsafe { Box::from_raw(result) };
         if !box_result.keys.is_null() {
-            let keys =
-                unsafe { Vec::from_raw_parts(box_result.keys, box_result.keys_len, box_result.keys_len) };
+            let keys = unsafe {
+                Vec::from_raw_parts(box_result.keys, box_result.keys_len, box_result.keys_len)
+            };
             for key in keys {
                 if !key.is_null() {
                     unsafe {

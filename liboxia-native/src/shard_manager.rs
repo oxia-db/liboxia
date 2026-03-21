@@ -1,6 +1,6 @@
 use crate::address::ensure_protocol;
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::{UnexpectedStatus};
+use crate::errors::OxiaError::UnexpectedStatus;
 use crate::oxia::shard_assignment::ShardBoundaries;
 use crate::oxia::{ShardAssignment, ShardAssignmentsRequest};
 use crate::provider_manager::ProviderManager;

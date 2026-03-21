@@ -1,8 +1,6 @@
 use crate::errors::OxiaError;
 use crate::errors::OxiaError::{SessionDoesNotExist, ShardLeaderNotFound, UnexpectedStatus};
-use crate::oxia::{
-    CloseSessionRequest, CreateSessionRequest, SessionHeartbeat,
-};
+use crate::oxia::{CloseSessionRequest, CreateSessionRequest, SessionHeartbeat};
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
 use crate::status::CODE_SESSION_NOT_FOUND;
