@@ -1,7 +1,6 @@
 use liboxia::client::{
-    DeleteOption, DeleteRangeOption, GetOption,
-    KeyCreated, KeyDeleted, KeyModified, ListOption, Notification,
-    PutOption, RangeScanOption,
+    DeleteOption, DeleteRangeOption, GetOption, KeyCreated, KeyDeleted, KeyModified, ListOption,
+    Notification, PutOption, RangeScanOption,
 };
 use liboxia::client_builder::OxiaClientBuilder;
 use liboxia::errors::OxiaError;
@@ -61,10 +60,7 @@ async fn test_put_and_get() {
     let get_result = client.get("test/key1".to_string()).await.unwrap();
     assert_eq!(get_result.key, "test/key1");
     assert_eq!(get_result.value, Some(b"hello world".to_vec()));
-    assert_eq!(
-        get_result.version.version_id,
-        put_result.version.version_id
-    );
+    assert_eq!(get_result.version.version_id, put_result.version.version_id);
 
     client.shutdown().await.unwrap();
 }
@@ -161,10 +157,7 @@ async fn test_list() {
     let client = new_client(&address).await;
 
     for key in &["list/a", "list/b", "list/c"] {
-        client
-            .put(key.to_string(), b"v".to_vec())
-            .await
-            .unwrap();
+        client.put(key.to_string(), b"v".to_vec()).await.unwrap();
     }
 
     let result = client
@@ -192,10 +185,7 @@ async fn test_range_scan() {
 
     for i in 0..3 {
         client
-            .put(
-                format!("scan/{}", i),
-                format!("value-{}", i).into_bytes(),
-            )
+            .put(format!("scan/{}", i), format!("value-{}", i).into_bytes())
             .await
             .unwrap();
     }
@@ -330,9 +320,7 @@ async fn test_delete_with_expected_version() {
     client
         .delete_with_options(
             "delver/key".to_string(),
-            vec![DeleteOption::ExpectVersionId(
-                put_result.version.version_id,
-            )],
+            vec![DeleteOption::ExpectVersionId(put_result.version.version_id)],
         )
         .await
         .unwrap();
@@ -353,10 +341,7 @@ async fn test_get_floor() {
     let client = new_client(&address).await;
 
     for key in &["cmp/a", "cmp/c", "cmp/e"] {
-        client
-            .put(key.to_string(), b"v".to_vec())
-            .await
-            .unwrap();
+        client.put(key.to_string(), b"v".to_vec()).await.unwrap();
     }
 
     // Floor of "cmp/d" should be "cmp/c" (highest key <= "cmp/d")
@@ -382,10 +367,7 @@ async fn test_get_ceiling() {
     let client = new_client(&address).await;
 
     for key in &["cmp2/a", "cmp2/c", "cmp2/e"] {
-        client
-            .put(key.to_string(), b"v".to_vec())
-            .await
-            .unwrap();
+        client.put(key.to_string(), b"v".to_vec()).await.unwrap();
     }
 
     // Ceiling of "cmp2/b" should be "cmp2/c" (lowest key >= "cmp2/b")
@@ -411,10 +393,7 @@ async fn test_get_lower() {
     let client = new_client(&address).await;
 
     for key in &["cmp3/a", "cmp3/c", "cmp3/e"] {
-        client
-            .put(key.to_string(), b"v".to_vec())
-            .await
-            .unwrap();
+        client.put(key.to_string(), b"v".to_vec()).await.unwrap();
     }
 
     // Lower of "cmp3/c" should be "cmp3/a" (highest key < "cmp3/c")
@@ -440,10 +419,7 @@ async fn test_get_higher() {
     let client = new_client(&address).await;
 
     for key in &["cmp4/a", "cmp4/c", "cmp4/e"] {
-        client
-            .put(key.to_string(), b"v".to_vec())
-            .await
-            .unwrap();
+        client.put(key.to_string(), b"v".to_vec()).await.unwrap();
     }
 
     // Higher of "cmp4/c" should be "cmp4/e" (lowest key > "cmp4/c")
@@ -842,12 +818,9 @@ async fn test_client_clone_concurrent() {
     for i in 0..10 {
         let c = client.clone();
         handles.push(tokio::spawn(async move {
-            c.put(
-                format!("clone/{}", i),
-                format!("value-{}", i).into_bytes(),
-            )
-            .await
-            .unwrap();
+            c.put(format!("clone/{}", i), format!("value-{}", i).into_bytes())
+                .await
+                .unwrap();
             let get = c.get(format!("clone/{}", i)).await.unwrap();
             assert_eq!(get.value, Some(format!("value-{}", i).into_bytes()));
         }));
@@ -895,10 +868,7 @@ async fn test_version_metadata() {
 
     assert!(r2.version.version_id > r1.version.version_id);
     assert!(r2.version.modifications_count >= 1);
-    assert_eq!(
-        r2.version.created_timestamp,
-        r1.version.created_timestamp
-    );
+    assert_eq!(r2.version.created_timestamp, r1.version.created_timestamp);
     assert!(r2.version.modified_timestamp >= r1.version.modified_timestamp);
 
     client

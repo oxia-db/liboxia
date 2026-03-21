@@ -37,10 +37,7 @@ async fn main() {
     let listener = tokio::spawn(async move {
         let mut count = 0;
         while let Some(highest_key) = sequence_rx.recv().await {
-            info!(
-                "Sequence update: highest_sequence_key={:?}",
-                highest_key
-            );
+            info!("Sequence update: highest_sequence_key={:?}", highest_key);
             count += 1;
             if count >= 5 {
                 break;
@@ -65,10 +62,7 @@ async fn main() {
             )
             .await
             .unwrap();
-        info!(
-            "Put sequence event {}: generated key={:?}",
-            i, result.key
-        );
+        info!("Put sequence event {}: generated key={:?}", i, result.key);
     }
 
     // Wait for listener to process updates (with timeout)

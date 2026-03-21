@@ -96,6 +96,7 @@ impl BatchManager {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_batcher(
     context: CancellationToken,
     mut rx: UnboundedReceiver<Operation>,

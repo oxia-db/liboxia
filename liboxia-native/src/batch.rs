@@ -76,11 +76,8 @@ impl ReadBatch {
         true
     }
     fn add(&mut self, operation: Operation) {
-        match operation {
-            Operation::Get(get) => {
-                self.get_inflight.push(get);
-            }
-            _ => {}
+        if let Operation::Get(get) = operation {
+            self.get_inflight.push(get);
         }
     }
 
@@ -105,9 +102,8 @@ impl ReadBatch {
                 }
                 match provider.read(request).await {
                     Ok(response) => {
-                        let result = self.receive_all(response).await;
-                        if result.is_err() {
-                            self.failure_inflight(result.unwrap_err())
+                        if let Err(err) = self.receive_all(response).await {
+                            self.failure_inflight(err)
                         }
                     }
                     Err(err) => self.failure_inflight(UnexpectedStatus(err.to_string())),
@@ -129,11 +125,9 @@ impl ReadBatch {
                 // stream is closed
                 break;
             }
-            let next_result = next.unwrap();
-            if next_result.is_err() {
-                return Err(UnexpectedStatus(next_result.unwrap_err().to_string()));
-            }
-            let read_response = next_result?;
+            let read_response = next
+                .unwrap()
+                .map_err(|err| UnexpectedStatus(err.to_string()))?;
             for get_response in read_response.gets {
                 let next_inflight = inflight_iter.next();
                 if next_inflight.is_none() {
@@ -218,10 +212,8 @@ impl WriteBatch {
         }
         match self.write_stream_manager.write(write_request).await {
             Ok(response) => {
-                for (mut operation, put_response) in self
-                    .put_inflight
-                    .drain(..)
-                    .zip(response.puts.into_iter())
+                for (mut operation, put_response) in
+                    self.put_inflight.drain(..).zip(response.puts.into_iter())
                 {
                     operation.complete(put_response);
                 }

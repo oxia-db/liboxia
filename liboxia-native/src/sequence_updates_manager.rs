@@ -19,7 +19,7 @@ pub struct SequenceUpdatesManager {
 }
 
 impl SequenceUpdatesManager {
-    pub  fn new(
+    pub fn new(
         key: String,
         partition_key: String,
         shard_manager: Arc<ShardManager>,
