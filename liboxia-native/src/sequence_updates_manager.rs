@@ -76,7 +76,8 @@ async fn start_listener(
                     Some(leader) => {
                         let mut provider = provider_manager
                             .get_provider(leader.service_address)
-                            .await?;
+                            .await
+                            .map_err(Error::transient)?;
                         let mut streaming = provider
                             .get_sequence_updates(Request::new(GetSequenceUpdatesRequest {
                                 shard,
@@ -94,14 +95,18 @@ async fn start_listener(
                                 next_response = streaming.next() => {
                                     match next_response {
                                     None => {
-                                        info!("Close shards assignment stream due to context canceled.");
-                                        return Ok(());
+                                        info!("Sequence updates stream closed by server.");
+                                        return Err(Error::transient(UnexpectedStatus(
+                                            "sequence updates stream closed by server".to_string(),
+                                        )));
                                     }
                                     Some(result) => {
                                         let response = result
                                             .map_err(|err| Error::transient(UnexpectedStatus(err.to_string())))?;
-                                         sender.send(response.highest_sequence_key).await
-                                            .map_err(|err| Error::transient(UnexpectedStatus(err.to_string())))?;
+                                        if sender.send(response.highest_sequence_key).await.is_err() {
+                                            // Receiver dropped, stop listening
+                                            return Ok(());
+                                        }
                                     }}
                                 }
                             }
