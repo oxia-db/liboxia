@@ -6,7 +6,6 @@ use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
 use backoff::{Error, ExponentialBackoff};
 use dashmap::DashMap;
-use futures::TryFutureExt;
 use log::{info, warn};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -81,18 +80,19 @@ async fn start_notification_listener(
         let sender = sender.clone();
         async move {
             let mut provider = match shard_manager.get_leader(shard_id) {
-                None => Err(ShardLeaderNotFound(shard_id)),
-                Some(leader) => Ok(provider_manager
+                None => return Err(Error::transient(ShardLeaderNotFound(shard_id))),
+                Some(leader) => provider_manager
                     .get_provider(leader.service_address)
-                    .await?),
-            }?;
+                    .await
+                    .map_err(Error::transient)?,
+            };
             let mut streaming = provider
                 .get_notifications(NotificationsRequest {
                     shard: shard_id,
                     start_offset_exclusive: Some(offset_ref.load(Ordering::Acquire)),
                 })
-                .map_err(|err| UnexpectedStatus(err.to_string()))
-                .await?
+                .await
+                .map_err(|err| Error::transient(UnexpectedStatus(err.to_string())))?
                 .into_inner();
             loop {
                 tokio::select! {
@@ -104,13 +104,15 @@ async fn start_notification_listener(
                         None => {
                             return Err(Error::transient(UnexpectedStatus(String::from( "streaming has closed by server", )))); }
                         Some(notification) => {
-                            let batch = notification.map_err(|err| UnexpectedStatus(err.to_string()))?;
+                            let batch = notification.map_err(|err| {
+                                Error::transient(UnexpectedStatus(err.to_string()))
+                            })?;
                             offset_ref.store(batch.offset, Ordering::Release);
                             for notification_tuple in batch.notifications {
-                                    sender
-                                        .send(notification_tuple.into())
-                                        .await
-                                        .map_err(|err| UnexpectedStatus(err.to_string()))?;
+                                    if sender.send(notification_tuple.into()).await.is_err() {
+                                        // Receiver dropped, stop listening
+                                        return Ok(());
+                                    }
                             }
                     }
                 }

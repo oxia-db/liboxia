@@ -89,7 +89,8 @@ async fn start_keep_alive(
                 Some(leader) => {
                     let mut provider = local_provider_manager
                         .get_provider(leader.service_address)
-                        .await?;
+                        .await
+                        .map_err(Error::transient)?;
                     let mut ticker = interval(heartbeat_interval);
                     loop {
                         tokio::select! {
@@ -197,7 +198,7 @@ impl SessionManager {
                         let response = provider
                             .create_session(Request::new(CreateSessionRequest {
                                 shard: shard_id,
-                                session_timeout_ms: self.session_timeout.clone().as_millis() as u32,
+                                session_timeout_ms: self.session_timeout.as_millis() as u32,
                                 client_identity: self.identity.clone(),
                             }))
                             .await

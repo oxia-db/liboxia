@@ -980,7 +980,6 @@ version = "0.0.2"
 dependencies = [
  "backoff",
  "dashmap",
- "futures",
  "log",
  "prost",
  "testcontainers",
