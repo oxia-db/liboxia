@@ -43,6 +43,9 @@ impl From<Vec<PutOption>> for PutOperation {
         let mut operation = PutOperation::default();
         for option in options {
             match option {
+                PutOption::ExpectedRecordNotExists() => {
+                    operation.expected_version_id = Some(-1)
+                }
                 PutOption::ExpectVersionId(expected_version_id) => {
                     operation.expected_version_id = Some(expected_version_id)
                 }
@@ -290,7 +293,10 @@ impl CompletableOperation<GetResponse> for GetOperation {
 
 impl From<Vec<GetOption>> for GetOperation {
     fn from(options: Vec<GetOption>) -> Self {
-        let mut operation = GetOperation::default();
+        let mut operation = GetOperation {
+            include_value: true,
+            ..GetOperation::default()
+        };
         for option in options {
             match option {
                 GetOption::PartitionKey(partition_key) => {
@@ -299,8 +305,8 @@ impl From<Vec<GetOption>> for GetOperation {
                 GetOption::ComparisonType(comparison_type) => {
                     operation.comparison_type = comparison_type
                 }
-                GetOption::IncludeValue() => {
-                    operation.include_value = true;
+                GetOption::IncludeValue(include) => {
+                    operation.include_value = include;
                 }
                 GetOption::UseIndex(index) => {
                     operation.secondary_index_name = Some(index);

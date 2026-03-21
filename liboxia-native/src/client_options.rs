@@ -9,6 +9,7 @@ pub struct OxiaClientOptions {
     pub batch_linger: Duration,
     pub batch_max_size: u32,
     pub session_timeout: Duration,
+    pub request_timeout: Duration,
 }
 
 impl Default for OxiaClientOptions {
@@ -20,6 +21,7 @@ impl Default for OxiaClientOptions {
             batch_linger: Duration::from_millis(5),
             batch_max_size: 128 * 1024,
             session_timeout: Duration::from_secs(15),
+            request_timeout: Duration::from_secs(30),
         }
     }
 }

@@ -13,8 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, OnceCell};
 use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
-use tonic::{Request};
+use tonic::Request;
 
 struct Inner {
     shard_id: i64,
@@ -33,6 +34,7 @@ impl Session {
     pub fn new(
         shard_id: i64,
         session_id: i64,
+        session_timeout: Duration,
         shard_manager: Arc<ShardManager>,
         provider_manager: Arc<ProviderManager>,
     ) -> Self {
@@ -43,6 +45,7 @@ impl Session {
             provider_manager.clone(),
             shard_id,
             session_id,
+            session_timeout,
         ))));
         let session = Self {
             handle,
@@ -74,7 +77,10 @@ async fn start_keep_alive(
     provider_manager: Arc<ProviderManager>,
     shard_id: i64,
     session_id: i64,
+    session_timeout: Duration,
 ) {
+    // Send heartbeats at 1/3 of the session timeout to ensure we don't miss
+    let heartbeat_interval = session_timeout / 3;
     let op_defer = || {
         let local_shard_manager = shard_manager.clone();
         let local_provider_manager = provider_manager.clone();
@@ -86,23 +92,24 @@ async fn start_keep_alive(
                     let mut provider = local_provider_manager
                         .get_provider(leader.service_address)
                         .await?;
+                    let mut ticker = interval(heartbeat_interval);
                     loop {
                         tokio::select! {
-                        _ = local_context.cancelled() => {
-                            info!("Session keep-alive exit due to cancellation.");
-                            return Ok(());
-                        },
-                        else => {
-                            let _ = provider
-                                .keep_alive(Request::new(SessionHeartbeat { shard: shard_id, session_id, }))
-                                .await
-                                .map_err(|err| {
-                                    if err.code() as i32 == CODE_SESSION_NOT_FOUND{
-                                         info!("Session keep-alive exit due to session not found.");
-                                        return Error::permanent(SessionDoesNotExist());
-                                    }
-                                    return Error::transient(UnexpectedStatus(err.to_string()));
-                                });
+                            _ = local_context.cancelled() => {
+                                info!("Session keep-alive exit due to cancellation.");
+                                return Ok(());
+                            },
+                            _ = ticker.tick() => {
+                                provider
+                                    .keep_alive(Request::new(SessionHeartbeat { shard: shard_id, session_id }))
+                                    .await
+                                    .map_err(|err| {
+                                        if err.code() as i32 == CODE_SESSION_NOT_FOUND {
+                                            info!("Session keep-alive exit due to session not found.");
+                                            return Error::permanent(SessionDoesNotExist());
+                                        }
+                                        Error::transient(UnexpectedStatus(err.to_string()))
+                                    })?;
                             }
                         }
                     }
@@ -204,6 +211,7 @@ impl SessionManager {
                         Ok(Session::new(
                             shard_id,
                             session_id,
+                            self.session_timeout,
                             self.shard_manager.clone(),
                             self.provider_manager.clone(),
                         ))

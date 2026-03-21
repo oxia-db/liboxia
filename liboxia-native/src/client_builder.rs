@@ -11,6 +11,8 @@ pub struct OxiaClientBuilder {
     identity: Option<String>,
     batch_linger: Option<Duration>,
     batch_max_size: Option<u32>,
+    session_timeout: Option<Duration>,
+    request_timeout: Option<Duration>,
 }
 
 impl OxiaClientBuilder {
@@ -43,6 +45,16 @@ impl OxiaClientBuilder {
         self
     }
 
+    pub fn session_timeout(mut self, session_timeout: Duration) -> Self {
+        self.session_timeout = Some(session_timeout);
+        self
+    }
+
+    pub fn request_timeout(mut self, request_timeout: Duration) -> Self {
+        self.request_timeout = Some(request_timeout);
+        self
+    }
+
     pub async fn build(self) -> Result<OxiaClient, OxiaError> {
         let mut options = OxiaClientOptions::default();
         if let Some(service_address) = self.service_address {
@@ -59,6 +71,12 @@ impl OxiaClientBuilder {
         }
         if let Some(batch_max_size) = self.batch_max_size {
             options.batch_max_size = batch_max_size;
+        }
+        if let Some(session_timeout) = self.session_timeout {
+            options.session_timeout = session_timeout;
+        }
+        if let Some(request_timeout) = self.request_timeout {
+            options.request_timeout = request_timeout;
         }
         OxiaClient::new(options).await
     }

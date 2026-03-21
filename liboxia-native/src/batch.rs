@@ -217,21 +217,27 @@ impl WriteBatch {
             write_request.delete_ranges.push(operation.to_proto());
         }
         match self.write_stream_manager.write(write_request).await {
-            Ok(mut response) => {
-                if let Some(put_response) = response.puts.pop() {
-                    if let Some(mut put_operation) = self.put_inflight.pop() {
-                        put_operation.complete(put_response);
-                    }
+            Ok(response) => {
+                for (mut operation, put_response) in self
+                    .put_inflight
+                    .drain(..)
+                    .zip(response.puts.into_iter())
+                {
+                    operation.complete(put_response);
                 }
-                if let Some(delete_response) = response.deletes.pop() {
-                    if let Some(mut delete_operation) = self.delete_inflight.pop() {
-                        delete_operation.complete(delete_response);
-                    }
+                for (mut operation, delete_response) in self
+                    .delete_inflight
+                    .drain(..)
+                    .zip(response.deletes.into_iter())
+                {
+                    operation.complete(delete_response);
                 }
-                if let Some(delete_ranges_response) = response.delete_ranges.pop() {
-                    if let Some(mut delete_ranges_operation) = self.delete_range_inflight.pop() {
-                        delete_ranges_operation.complete(delete_ranges_response)
-                    }
+                for (mut operation, delete_range_response) in self
+                    .delete_range_inflight
+                    .drain(..)
+                    .zip(response.delete_ranges.into_iter())
+                {
+                    operation.complete(delete_range_response);
                 }
             }
             Err(err) => {
