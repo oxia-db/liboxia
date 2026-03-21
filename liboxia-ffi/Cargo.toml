@@ -7,10 +7,14 @@ edition = "2021"
 
 [lib]
 name = "liboxia_ffi"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 
 [dependencies]
 liboxia = { workspace = true }
 tokio = { workspace = true }
 libc = { workspace = true }
+
+[dev-dependencies]
+testcontainers = "0.23"
+tokio = { workspace = true }
