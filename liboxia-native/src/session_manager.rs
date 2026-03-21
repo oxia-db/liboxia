@@ -184,10 +184,7 @@ impl SessionManager {
     }
 
     pub(crate) async fn get_session_id(&self, shard_id: i64) -> Result<i64, OxiaError> {
-        let session_cell = self
-            .sessions
-            .entry(shard_id)
-            .or_insert_with(|| OnceCell::new());
+        let session_cell = self.sessions.entry(shard_id).or_default();
         let session = session_cell
             .get_or_try_init(|| async {
                 match self.shard_manager.get_leader(shard_id) {

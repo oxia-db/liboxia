@@ -26,16 +26,10 @@ impl WriteStreamManager {
     pub async fn write(&self, request: WriteRequest) -> Result<WriteResponse, OxiaError> {
         // todo: make request Rc
         loop {
-            let result = self.write0(request.clone()).await;
-            if result.is_ok() {
-                return result;
-            }
-            if result.is_err() {
-                let error = result.unwrap_err();
-                match error {
-                    InternalRetryable() => continue,
-                    _ => return Err(error),
-                }
+            match self.write0(request.clone()).await {
+                Ok(response) => return Ok(response),
+                Err(InternalRetryable()) => continue,
+                Err(err) => return Err(err),
             }
         }
     }
@@ -74,10 +68,7 @@ impl WriteStreamManager {
             w_stream.listen(streaming).await;
             Ok::<WriteStream, OxiaError>(w_stream)
         };
-        let mut cell = self
-            .streams
-            .entry(shard_id)
-            .or_insert_with(|| OnceCell::new());
+        let mut cell = self.streams.entry(shard_id).or_default();
         let initialized = cell.initialized();
         let w_stream = cell.get_or_try_init(defer_init).await?;
         if !w_stream.is_alive().await {

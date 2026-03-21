@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 mod address;
 mod batch;
 mod batch_manager;

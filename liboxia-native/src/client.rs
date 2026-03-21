@@ -449,7 +449,7 @@ impl OxiaClient {
         batcher: Batcher,
         key: &str,
     ) -> Result<(i64, Arc<BatchManager>), OxiaError> {
-        match self.inner.shard_manager.get_shard(&key) {
+        match self.inner.shard_manager.get_shard(key) {
             Some(shard_id) => self.get_or_init_batch_manager_with_shard(batcher, shard_id),
             None => Err(KeyLeaderNotFound(key.to_string())),
         }
@@ -467,8 +467,8 @@ impl OxiaClient {
                 self.inner.shard_manager.clone(),
                 self.inner.provider_manager.clone(),
                 self.inner.write_stream_manager.clone(),
-                self.inner.options.batch_linger.clone(),
-                self.inner.options.batch_max_size.clone(),
+                self.inner.options.batch_linger,
+                self.inner.options.batch_max_size,
             ))
         };
         let ref_mut = match batcher {
@@ -483,7 +483,7 @@ impl OxiaClient {
                 .entry(shard_id)
                 .or_insert_with(closure),
         };
-        Ok((ref_mut.key().clone(), ref_mut.value().clone()))
+        Ok((*ref_mut.key(), ref_mut.value().clone()))
     }
 }
 
@@ -518,7 +518,7 @@ impl Client for OxiaClient {
             .map_err(|err| UnexpectedStatus(err.to_string()))??;
         check_status(put_response.status)?;
         Ok(PutResult {
-            key: put_response.key.or(Some(key.clone())).unwrap(),
+            key: put_response.key.unwrap_or(key.clone()),
             version: put_response.version.unwrap(),
         })
     }
@@ -793,7 +793,7 @@ impl Client for OxiaClient {
     ) -> Result<Receiver<String>, OxiaError> {
         let mut manager_guard = self.inner.sequence_updates_manager.lock().await;
         let operation: GetSequenceUpdatesOperation = options.into();
-        if operation.partition_key == None {
+        if operation.partition_key.is_none() {
             return Err(IllegalArgument(
                 "required option: partition_key".to_string(),
             ));
@@ -949,23 +949,20 @@ async fn range_scan_from_single_shard(
         .await?
         .into_inner();
     let mut records = Vec::new();
-    loop {
-        match streaming.next().await {
-            Some(response) => match response {
-                Ok(response) => {
-                    for record in response.records {
-                        records.push(GetResult {
-                            key: record.key.unwrap(),
-                            value: record.value,
-                            version: record.version.unwrap(),
-                        })
-                    }
+    while let Some(response) = streaming.next().await {
+        match response {
+            Ok(response) => {
+                for record in response.records {
+                    records.push(GetResult {
+                        key: record.key.unwrap(),
+                        value: record.value,
+                        version: record.version.unwrap(),
+                    })
                 }
-                Err(err) => {
-                    return Err(UnexpectedStatus(err.to_string()));
-                }
-            },
-            None => break,
+            }
+            Err(err) => {
+                return Err(UnexpectedStatus(err.to_string()));
+            }
         }
     }
     Ok(RangeScanResult { records })
@@ -985,15 +982,12 @@ async fn list_from_single_shard(
         .await?
         .into_inner();
     let mut keys = Vec::new();
-    loop {
-        match streaming.next().await {
-            Some(response) => match response {
-                Ok(mut response) => keys.append(&mut response.keys),
-                Err(err) => {
-                    return Err(UnexpectedStatus(err.to_string()));
-                }
-            },
-            None => break,
+    while let Some(response) = streaming.next().await {
+        match response {
+            Ok(mut response) => keys.append(&mut response.keys),
+            Err(err) => {
+                return Err(UnexpectedStatus(err.to_string()));
+            }
         }
     }
     Ok(ListResult { keys })
@@ -1027,7 +1021,7 @@ async fn get_from_single_shard(
         .map_err(|err| UnexpectedStatus(err.to_string()))??;
     check_status(get_response.status)?;
     Ok(GetResult {
-        key: get_response.key.or(Some(extra_key)).unwrap(),
+        key: get_response.key.unwrap_or(extra_key),
         value: get_response.value,
         version: get_response.version.unwrap(),
     })
