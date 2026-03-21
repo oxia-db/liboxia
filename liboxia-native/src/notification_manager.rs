@@ -6,7 +6,6 @@ use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
 use backoff::{Error, ExponentialBackoff};
 use dashmap::DashMap;
-use futures::TryFutureExt;
 use log::{info, warn};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
