@@ -21,3 +21,8 @@ mod write_stream_manager;
 pub mod oxia {
     include!(concat!(env!("OUT_DIR"), "/io.streamnative.oxia.proto.rs"));
 }
+
+// Convenience re-exports for common types
+pub use client::OxiaClient;
+pub use client_builder::OxiaClientBuilder;
+pub use errors::OxiaError;
