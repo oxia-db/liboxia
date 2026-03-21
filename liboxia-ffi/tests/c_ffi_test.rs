@@ -1,23 +1,18 @@
 use std::process::Command;
-use testcontainers::core::ports::ContainerPort;
-use testcontainers::core::wait::WaitFor;
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{GenericImage, ImageExt};
+use testcontainers_oxia::standalone::OxiaStandalone;
 
 const OXIA_PORT: u16 = 6648;
-const DEFAULT_OXIA_IMAGE: &str = "oxia/oxia";
-const DEFAULT_OXIA_TAG: &str = "main";
 
 #[tokio::test]
 async fn test_c_ffi_integration() {
-    let image = std::env::var("OXIA_IMAGE").unwrap_or_else(|_| DEFAULT_OXIA_IMAGE.to_string());
-    let tag = std::env::var("OXIA_TAG").unwrap_or_else(|_| DEFAULT_OXIA_TAG.to_string());
+    let image = std::env::var("OXIA_IMAGE").unwrap_or_else(|_| "oxia/oxia".to_string());
+    let tag = std::env::var("OXIA_TAG").unwrap_or_else(|_| "main".to_string());
 
     // Start Oxia container
-    let container = GenericImage::new(image, tag)
-        .with_exposed_port(ContainerPort::Tcp(OXIA_PORT))
-        .with_wait_for(WaitFor::message_on_stdout("Started Grpc server"))
-        .with_cmd(vec!["oxia", "standalone"])
+    let container = OxiaStandalone::default()
+        .with_image(image)
+        .with_tag(tag)
         .start()
         .await
         .expect("Failed to start Oxia container");

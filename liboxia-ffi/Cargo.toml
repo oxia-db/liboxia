@@ -15,5 +15,6 @@ tokio = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
-testcontainers = "0.23"
+testcontainers = "0.25"
+testcontainers-oxia = "0.0.1"
 tokio = { workspace = true }

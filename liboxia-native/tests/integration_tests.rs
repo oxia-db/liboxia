@@ -6,34 +6,46 @@ use liboxia::client_builder::OxiaClientBuilder;
 use liboxia::errors::OxiaError;
 use liboxia::oxia::{KeyComparisonType, SecondaryIndex};
 use std::time::Duration;
-use testcontainers::core::ports::ContainerPort;
-use testcontainers::core::wait::WaitFor;
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage, ImageExt};
+use testcontainers::ContainerAsync;
+use testcontainers_oxia::standalone::OxiaStandalone;
+use tokio::sync::OnceCell;
 
 const OXIA_PORT: u16 = 6648;
-const DEFAULT_OXIA_IMAGE: &str = "oxia/oxia";
-const DEFAULT_OXIA_TAG: &str = "main";
 
-async fn start_oxia() -> (ContainerAsync<GenericImage>, String) {
-    let image = std::env::var("OXIA_IMAGE").unwrap_or_else(|_| DEFAULT_OXIA_IMAGE.to_string());
-    let tag = std::env::var("OXIA_TAG").unwrap_or_else(|_| DEFAULT_OXIA_TAG.to_string());
+struct OxiaTestEnv {
+    _container: ContainerAsync<OxiaStandalone>,
+    address: String,
+}
 
-    let container = GenericImage::new(image, tag)
-        .with_exposed_port(ContainerPort::Tcp(OXIA_PORT))
-        .with_wait_for(WaitFor::message_on_stdout("Started Grpc server"))
-        .with_cmd(vec!["oxia", "standalone"])
-        .start()
-        .await
-        .expect("Failed to start Oxia container");
+static OXIA_ENV: OnceCell<OxiaTestEnv> = OnceCell::const_new();
 
-    let host_port = container
-        .get_host_port_ipv4(OXIA_PORT)
-        .await
-        .expect("Failed to get host port");
+async fn get_oxia_address() -> &'static str {
+    let env = OXIA_ENV
+        .get_or_init(|| async {
+            let image = std::env::var("OXIA_IMAGE").unwrap_or_else(|_| "oxia/oxia".to_string());
+            let tag = std::env::var("OXIA_TAG").unwrap_or_else(|_| "main".to_string());
 
-    let address = format!("http://127.0.0.1:{}", host_port);
-    (container, address)
+            let container = OxiaStandalone::default()
+                .with_image(image)
+                .with_tag(tag)
+                .start()
+                .await
+                .expect("Failed to start Oxia container");
+
+            let host_port = container
+                .get_host_port_ipv4(OXIA_PORT)
+                .await
+                .expect("Failed to get host port");
+
+            let address = format!("http://127.0.0.1:{}", host_port);
+            OxiaTestEnv {
+                _container: container,
+                address,
+            }
+        })
+        .await;
+    &env.address
 }
 
 async fn new_client(address: &str) -> liboxia::client::OxiaClient {
@@ -51,8 +63,8 @@ async fn new_client(address: &str) -> liboxia::client::OxiaClient {
 
 #[tokio::test]
 async fn test_put_and_get() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let put_result = client
         .put("test/key1".to_string(), b"hello world".to_vec())
@@ -72,8 +84,8 @@ async fn test_put_and_get() {
 
 #[tokio::test]
 async fn test_put_overwrite() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let r1 = client
         .put("test/overwrite".to_string(), b"v1".to_vec())
@@ -94,8 +106,8 @@ async fn test_put_overwrite() {
 
 #[tokio::test]
 async fn test_delete() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     client
         .put("test/del".to_string(), b"val".to_vec())
@@ -111,8 +123,8 @@ async fn test_delete() {
 
 #[tokio::test]
 async fn test_get_nonexistent() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let result = client.get("nonexistent/key".to_string()).await;
     assert!(matches!(result, Err(OxiaError::KeyNotFound())));
@@ -122,8 +134,8 @@ async fn test_get_nonexistent() {
 
 #[tokio::test]
 async fn test_delete_range() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     for i in 0..5 {
         client
@@ -158,8 +170,8 @@ async fn test_delete_range() {
 
 #[tokio::test]
 async fn test_list() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     for key in &["list/a", "list/b", "list/c"] {
         client.put(key.to_string(), b"v".to_vec()).await.unwrap();
@@ -185,8 +197,8 @@ async fn test_list() {
 
 #[tokio::test]
 async fn test_range_scan() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     for i in 0..3 {
         client
@@ -216,8 +228,8 @@ async fn test_range_scan() {
 
 #[tokio::test]
 async fn test_list_empty_range() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let result = client
         .list("empty/".to_string(), "empty/~".to_string())
@@ -234,8 +246,8 @@ async fn test_list_empty_range() {
 
 #[tokio::test]
 async fn test_expected_version_id() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let r1 = client
         .put("ver/key".to_string(), b"v1".to_vec())
@@ -272,8 +284,8 @@ async fn test_expected_version_id() {
 
 #[tokio::test]
 async fn test_expected_record_not_exists() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // First put should succeed
     client
@@ -304,8 +316,8 @@ async fn test_expected_record_not_exists() {
 
 #[tokio::test]
 async fn test_delete_with_expected_version() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let put_result = client
         .put("delver/key".to_string(), b"value".to_vec())
@@ -342,8 +354,8 @@ async fn test_delete_with_expected_version() {
 
 #[tokio::test]
 async fn test_get_floor() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     for key in &["cmp/a", "cmp/c", "cmp/e"] {
         client.put(key.to_string(), b"v".to_vec()).await.unwrap();
@@ -368,8 +380,8 @@ async fn test_get_floor() {
 
 #[tokio::test]
 async fn test_get_ceiling() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     for key in &["cmp2/a", "cmp2/c", "cmp2/e"] {
         client.put(key.to_string(), b"v".to_vec()).await.unwrap();
@@ -394,8 +406,8 @@ async fn test_get_ceiling() {
 
 #[tokio::test]
 async fn test_get_lower() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     for key in &["cmp3/a", "cmp3/c", "cmp3/e"] {
         client.put(key.to_string(), b"v".to_vec()).await.unwrap();
@@ -420,8 +432,8 @@ async fn test_get_lower() {
 
 #[tokio::test]
 async fn test_get_higher() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     for key in &["cmp4/a", "cmp4/c", "cmp4/e"] {
         client.put(key.to_string(), b"v".to_vec()).await.unwrap();
@@ -450,10 +462,10 @@ async fn test_get_higher() {
 
 #[tokio::test]
 async fn test_ephemeral_keys() {
-    let (_container, address) = start_oxia().await;
+    let address = get_oxia_address().await;
 
     // Create client and put ephemeral key
-    let client1 = new_client(&address).await;
+    let client1 = new_client(address).await;
     client1
         .put_with_options(
             "eph/key1".to_string(),
@@ -471,7 +483,7 @@ async fn test_ephemeral_keys() {
     client1.shutdown().await.unwrap();
 
     // Wait for session to be cleaned up (retry with backoff)
-    let client2 = new_client(&address).await;
+    let client2 = new_client(address).await;
     let mut found_deleted = false;
     for attempt in 0..10 {
         tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await;
@@ -495,8 +507,8 @@ async fn test_ephemeral_keys() {
 
 #[tokio::test]
 async fn test_multiple_puts_batch() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // Put multiple records rapidly to exercise batching
     let mut handles = Vec::new();
@@ -532,8 +544,8 @@ async fn test_multiple_puts_batch() {
 
 #[tokio::test]
 async fn test_notifications() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let mut notification_rx = client.get_notifications().await.unwrap();
 
@@ -605,8 +617,8 @@ async fn test_notifications() {
 
 #[tokio::test]
 async fn test_partition_key() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // Put with partition key
     let result = client
@@ -658,8 +670,8 @@ async fn test_partition_key() {
 
 #[tokio::test]
 async fn test_sequence_keys() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let partition_key = "seq-part".to_string();
 
@@ -710,8 +722,8 @@ async fn test_sequence_keys() {
 
 #[tokio::test]
 async fn test_secondary_index() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // Put records with secondary indexes
     client
@@ -784,10 +796,10 @@ async fn test_secondary_index() {
 
 #[tokio::test]
 async fn test_client_builder_options() {
-    let (_container, address) = start_oxia().await;
+    let address = get_oxia_address().await;
 
     let client = OxiaClientBuilder::new()
-        .service_address(address)
+        .service_address(address.to_string())
         .namespace("default".to_string())
         .identity("test-client".to_string())
         .batch_linger(Duration::from_millis(10))
@@ -819,8 +831,8 @@ async fn test_client_builder_options() {
 
 #[tokio::test]
 async fn test_client_clone_concurrent() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // Use cloned clients concurrently from multiple tasks
     let mut handles = Vec::new();
@@ -858,8 +870,8 @@ async fn test_client_clone_concurrent() {
 
 #[tokio::test]
 async fn test_version_metadata() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let r1 = client
         .put("meta/key".to_string(), b"v1".to_vec())
@@ -893,8 +905,8 @@ async fn test_version_metadata() {
 
 #[tokio::test]
 async fn test_get_without_value() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     client
         .put("noval/key".to_string(), b"some-value".to_vec())
@@ -931,8 +943,8 @@ async fn test_get_without_value() {
 
 #[tokio::test]
 async fn test_large_value() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // 1MB value
     let large_value: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
@@ -958,8 +970,8 @@ async fn test_large_value() {
 
 #[tokio::test]
 async fn test_delete_nonexistent_key() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // Deleting a key that doesn't exist should succeed (idempotent)
     let result = client.delete("nonexistent/key123".to_string()).await;
@@ -975,8 +987,8 @@ async fn test_delete_nonexistent_key() {
 
 #[tokio::test]
 async fn test_sequential_operations() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // Create
     let r1 = client
@@ -1025,8 +1037,8 @@ async fn test_sequential_operations() {
 
 #[tokio::test]
 async fn test_range_scan_values() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let pairs = vec![("rsv/a", "apple"), ("rsv/b", "banana"), ("rsv/c", "cherry")];
     for (key, val) in &pairs {
@@ -1061,8 +1073,8 @@ async fn test_range_scan_values() {
 
 #[tokio::test]
 async fn test_empty_value() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     client
         .put("empty-val/key".to_string(), b"".to_vec())
@@ -1090,8 +1102,8 @@ async fn test_empty_value() {
 
 #[tokio::test]
 async fn test_special_chars_in_keys() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let special_keys = vec![
         "special/key-with-dashes",
@@ -1126,8 +1138,8 @@ async fn test_special_chars_in_keys() {
 
 #[tokio::test]
 async fn test_notifications_with_buffer_size() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let mut notification_rx = client
         .get_notifications_with_options(vec![liboxia::client::GetNotificationOption::BufferSize(
@@ -1164,8 +1176,8 @@ async fn test_notifications_with_buffer_size() {
 
 #[tokio::test]
 async fn test_concurrent_read_write() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // Write initial data
     for i in 0..10 {
@@ -1220,8 +1232,8 @@ async fn test_concurrent_read_write() {
 
 #[tokio::test]
 async fn test_delete_range_with_partition_key() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let pk = "dr-part".to_string();
 
@@ -1266,8 +1278,8 @@ async fn test_delete_range_with_partition_key() {
 
 #[tokio::test]
 async fn test_range_scan_with_partition_key() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let pk = "rspk-part".to_string();
 
@@ -1310,8 +1322,8 @@ async fn test_range_scan_with_partition_key() {
 
 #[tokio::test]
 async fn test_high_throughput_writes() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     let num_ops = 100;
     let mut handles = Vec::new();
@@ -1406,8 +1418,8 @@ async fn test_notification_display() {
 
 #[tokio::test]
 async fn test_multiple_secondary_indexes() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // Put a record with multiple secondary indexes
     client
@@ -1469,8 +1481,8 @@ async fn test_multiple_secondary_indexes() {
 
 #[tokio::test]
 async fn test_list_partial_range() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     for key in &["pr/a", "pr/b", "pr/c", "pr/d", "pr/e"] {
         client.put(key.to_string(), b"v".to_vec()).await.unwrap();
@@ -1498,8 +1510,8 @@ async fn test_list_partial_range() {
 
 #[tokio::test]
 async fn test_read_your_writes() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     for i in 0..50 {
         let key = format!("ryw/{}", i);
@@ -1525,9 +1537,9 @@ async fn test_read_your_writes() {
 
 #[tokio::test]
 async fn test_multiple_clients() {
-    let (_container, address) = start_oxia().await;
-    let client1 = new_client(&address).await;
-    let client2 = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client1 = new_client(address).await;
+    let client2 = new_client(address).await;
 
     // Client 1 writes
     client1
@@ -1563,8 +1575,8 @@ async fn test_multiple_clients() {
 
 #[tokio::test]
 async fn test_cas_loop() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // Create initial record
     let initial = client
@@ -1603,8 +1615,8 @@ async fn test_cas_loop() {
 
 #[tokio::test]
 async fn test_binary_values() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // Store binary data that isn't valid UTF-8
     let binary_data: Vec<u8> = vec![0x00, 0x01, 0xFF, 0xFE, 0x80, 0x90, 0xAB, 0xCD];
@@ -1629,8 +1641,8 @@ async fn test_binary_values() {
 
 #[tokio::test]
 async fn test_overwrite_different_sizes() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // Start with a small value
     client
@@ -1670,8 +1682,8 @@ async fn test_overwrite_different_sizes() {
 
 #[tokio::test]
 async fn test_concurrent_cas_conflict() {
-    let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    let address = get_oxia_address().await;
+    let client = new_client(address).await;
 
     // Create a key
     let initial = client
