@@ -170,7 +170,7 @@ impl CompletableOperation<DeleteResponse> for DeleteOperation {
 }
 
 #[derive(Default)]
-pub struct DeleteRangeOperation {
+pub(crate) struct DeleteRangeOperation {
     pub(crate) callback: Option<Sender<Result<DeleteRangeResponse, OxiaError>>>,
     pub(crate) partition_key: Option<String>,
     pub(crate) start_inclusive: String,
