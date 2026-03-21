@@ -47,7 +47,30 @@ async fn test_c_ffi_integration() {
     let unity_include = tests_dir.join("c").join("vendor").join("unity");
     let c_test_bin = target_dir.join("test_ffi_c");
 
-    // Compile the C test with Unity
+    // Build the cdylib first (cargo test doesn't always build it)
+    let build = Command::new("cargo")
+        .args(["build", "-p", "liboxia-ffi"])
+        .output()
+        .expect("Failed to build liboxia-ffi");
+    assert!(
+        build.status.success(),
+        "Failed to build liboxia-ffi: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    // Find the shared library
+    let lib_path = if cfg!(target_os = "macos") {
+        target_dir.join("libliboxia_ffi.dylib")
+    } else {
+        target_dir.join("libliboxia_ffi.so")
+    };
+    assert!(
+        lib_path.exists(),
+        "Shared library not found at {:?}",
+        lib_path
+    );
+
+    // Compile the C test with Unity, linking directly to the library
     let compile = Command::new("cc")
         .args([
             c_test_src.to_str().unwrap(),
@@ -55,8 +78,7 @@ async fn test_c_ffi_integration() {
             "-o",
             c_test_bin.to_str().unwrap(),
             &format!("-I{}", unity_include.display()),
-            &format!("-L{}", target_dir.display()),
-            "-lliboxia_ffi",
+            lib_path.to_str().unwrap(),
             &format!("-Wl,-rpath,{}", target_dir.display()),
             "-Wall",
             "-Wextra",

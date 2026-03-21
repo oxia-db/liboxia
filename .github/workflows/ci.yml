@@ -65,8 +65,11 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Build workspace
+        run: cargo build --workspace
+
       - name: Run Rust integration tests
-        run: cargo test --workspace --test '*'
+        run: cargo test -p liboxia --test '*' -- --nocapture
 
       - name: Run C FFI integration tests
         run: cargo test -p liboxia-ffi --test c_ffi_test -- --nocapture
