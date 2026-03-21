@@ -40,5 +40,33 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
-      - name: Run tests
-        run: cargo test --workspace
+      - name: Run unit tests
+        run: cargo test --workspace --lib
+
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler build-essential
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run Rust integration tests
+        run: cargo test --workspace --test '*'
+
+      - name: Run C FFI integration tests
+        run: cargo test -p liboxia-ffi --test c_ffi_test -- --nocapture

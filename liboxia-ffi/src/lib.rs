@@ -344,6 +344,114 @@ pub extern "C" fn oxia_client_delete_range(
     }
 }
 
+#[repr(C)]
+pub struct COxiaRangeScanRecord {
+    pub key: *mut c_char,
+    pub value: *mut u8,
+    pub value_len: usize,
+    pub version_id: i64,
+}
+
+#[repr(C)]
+pub struct COxiaRangeScanResult {
+    pub records: *mut COxiaRangeScanRecord,
+    pub records_len: usize,
+}
+
+#[no_mangle]
+pub extern "C" fn oxia_client_range_scan(
+    client: *const OxiaClient,
+    min_key_inclusive: *const c_char,
+    max_key_exclusive: *const c_char,
+    result_ptr: *mut *mut COxiaRangeScanResult,
+) -> COxiaError {
+    let rt = get_runtime();
+    let min_key = unsafe {
+        CStr::from_ptr(min_key_inclusive)
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    let max_key = unsafe {
+        CStr::from_ptr(max_key_exclusive)
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    let result = rt.block_on(async {
+        let rust_client = unsafe { &*client };
+        rust_client.0.range_scan(min_key, max_key).await
+    });
+
+    match result {
+        Ok(scan_result) => {
+            let c_records: Vec<COxiaRangeScanRecord> = scan_result
+                .records
+                .into_iter()
+                .map(|r| {
+                    let key = CString::new(r.key).unwrap().into_raw();
+                    let (value, value_len) = match r.value {
+                        Some(v) => {
+                            let ptr = v.as_ptr() as *mut u8;
+                            let len = v.len();
+                            std::mem::forget(v);
+                            (ptr, len)
+                        }
+                        None => (std::ptr::null_mut(), 0),
+                    };
+                    COxiaRangeScanRecord {
+                        key,
+                        value,
+                        value_len,
+                        version_id: r.version.version_id,
+                    }
+                })
+                .collect();
+            let records_len = c_records.len();
+            let records_ptr = c_records.as_ptr() as *mut COxiaRangeScanRecord;
+            std::mem::forget(c_records);
+            let c_result = COxiaRangeScanResult {
+                records: records_ptr,
+                records_len,
+            };
+            unsafe {
+                *result_ptr = Box::into_raw(Box::new(c_result));
+            }
+            COxiaError::Ok
+        }
+        Err(err) => COxiaError::from(err),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn oxia_range_scan_result_free(result: *mut COxiaRangeScanResult) {
+    if !result.is_null() {
+        let box_result = unsafe { Box::from_raw(result) };
+        if !box_result.records.is_null() {
+            let records = unsafe {
+                Vec::from_raw_parts(
+                    box_result.records,
+                    box_result.records_len,
+                    box_result.records_len,
+                )
+            };
+            for record in records {
+                if !record.key.is_null() {
+                    unsafe {
+                        let _ = CString::from_raw(record.key);
+                    }
+                }
+                if !record.value.is_null() {
+                    unsafe {
+                        let _ =
+                            Vec::from_raw_parts(record.value, record.value_len, record.value_len);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn oxia_get_result_free(result: *mut COxiaGetResult) {
     if !result.is_null() {

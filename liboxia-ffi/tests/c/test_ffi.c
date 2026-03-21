@@ -179,6 +179,40 @@ void test_binary_value(void) {
     oxia_get_result_free(get_result);
 }
 
+/* ============================================================
+ * Test: range_scan returns records with keys and values
+ * ============================================================ */
+void test_range_scan(void) {
+    const char* keys[] = {"c-test/scan/a", "c-test/scan/b", "c-test/scan/c"};
+    const char* values[] = {"alpha", "beta", "gamma"};
+
+    for (int i = 0; i < 3; i++) {
+        COxiaPutResult* put_result = NULL;
+        COxiaError err = oxia_client_put(client, keys[i],
+            (const uint8_t*)values[i], strlen(values[i]), &put_result);
+        TEST_ASSERT_EQUAL_INT(Ok, err);
+        oxia_put_result_free(put_result);
+    }
+
+    COxiaRangeScanResult* scan_result = NULL;
+    COxiaError err = oxia_client_range_scan(client, "c-test/scan/", "c-test/scan/~", &scan_result);
+    TEST_ASSERT_EQUAL_INT(Ok, err);
+    TEST_ASSERT_NOT_NULL(scan_result);
+    TEST_ASSERT_EQUAL_UINT(3, scan_result->records_len);
+
+    for (int i = 0; i < 3; i++) {
+        TEST_ASSERT_EQUAL_STRING(keys[i], scan_result->records[i].key);
+        TEST_ASSERT_EQUAL_UINT(strlen(values[i]), scan_result->records[i].value_len);
+        TEST_ASSERT_EQUAL_MEMORY(values[i], scan_result->records[i].value,
+                                 scan_result->records[i].value_len);
+        TEST_ASSERT_TRUE(scan_result->records[i].version_id >= 0);
+    }
+    oxia_range_scan_result_free(scan_result);
+
+    /* Cleanup */
+    oxia_client_delete_range(client, "c-test/scan/", "c-test/scan/~");
+}
+
 int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
@@ -208,6 +242,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(test_delete_range);
     RUN_TEST(test_put_overwrite);
     RUN_TEST(test_binary_value);
+    RUN_TEST(test_range_scan);
     int result = UNITY_END();
 
     /* Cleanup */
