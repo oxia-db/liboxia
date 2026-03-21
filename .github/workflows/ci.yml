@@ -19,8 +19,8 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler build-essential
 
       - name: Cache cargo
         uses: actions/cache@v4
