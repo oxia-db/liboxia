@@ -84,11 +84,13 @@ impl ReadBatch {
     }
 
     async fn flush(&mut self) {
-        let option = self.shard_manager.get_leader(self.shard_id);
-        if option.is_none() {
-            return;
-        }
-        let node = option.unwrap();
+        let node = match self.shard_manager.get_leader(self.shard_id) {
+            Some(node) => node,
+            None => {
+                self.failure_inflight(OxiaError::ShardLeaderNotFound(self.shard_id));
+                return;
+            }
+        };
         match self
             .provider_manager
             .get_provider(node.service_address)
