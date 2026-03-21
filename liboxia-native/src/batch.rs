@@ -52,18 +52,21 @@ pub(crate) struct ReadBatch {
     shard_id: i64,
     shard_manager: Arc<ShardManager>,
     provider_manager: Arc<ProviderManager>,
+    max_requests: u32,
 }
 impl ReadBatch {
     pub fn new(
         shard_id: i64,
         shard_manager: Arc<ShardManager>,
         provider_manager: Arc<ProviderManager>,
+        max_requests: u32,
     ) -> Self {
         ReadBatch {
             get_inflight: Vec::new(),
             shard_id,
             shard_manager,
             provider_manager,
+            max_requests,
         }
     }
 
@@ -72,8 +75,7 @@ impl ReadBatch {
     }
 
     fn can_add(&self, _: &Operation) -> bool {
-        //todo: support it
-        true
+        (self.get_inflight.len() as u32) < self.max_requests
     }
     fn add(&mut self, operation: Operation) {
         if let Operation::Get(get) = operation {
@@ -155,16 +157,22 @@ pub(crate) struct WriteBatch {
     delete_inflight: Vec<DeleteOperation>,
     delete_range_inflight: Vec<DeleteRangeOperation>,
     write_stream_manager: Arc<WriteStreamManager>,
+    max_requests: u32,
 }
 
 impl WriteBatch {
-    pub fn new(shard_id: i64, write_stream_manager: Arc<WriteStreamManager>) -> Self {
+    pub fn new(
+        shard_id: i64,
+        write_stream_manager: Arc<WriteStreamManager>,
+        max_requests: u32,
+    ) -> Self {
         WriteBatch {
             shard_id,
             put_inflight: Vec::new(),
             delete_inflight: Vec::new(),
             delete_range_inflight: Vec::new(),
             write_stream_manager,
+            max_requests,
         }
     }
 
@@ -174,9 +182,13 @@ impl WriteBatch {
             && self.delete_range_inflight.is_empty()
     }
 
+    fn total_count(&self) -> u32 {
+        (self.put_inflight.len() + self.delete_inflight.len() + self.delete_range_inflight.len())
+            as u32
+    }
+
     fn can_add(&self, _: &Operation) -> bool {
-        //todo: support it
-        true
+        self.total_count() < self.max_requests
     }
 
     fn add(&mut self, operation: Operation) {
@@ -212,24 +224,32 @@ impl WriteBatch {
         }
         match self.write_stream_manager.write(write_request).await {
             Ok(response) => {
-                for (mut operation, put_response) in
-                    self.put_inflight.drain(..).zip(response.puts.into_iter())
-                {
-                    operation.complete(put_response);
+                let mut put_responses = response.puts.into_iter();
+                for mut operation in self.put_inflight.drain(..) {
+                    match put_responses.next() {
+                        Some(put_response) => operation.complete(put_response),
+                        None => operation.complete_exception(UnexpectedStatus(
+                            "missing put response from server".to_string(),
+                        )),
+                    }
                 }
-                for (mut operation, delete_response) in self
-                    .delete_inflight
-                    .drain(..)
-                    .zip(response.deletes.into_iter())
-                {
-                    operation.complete(delete_response);
+                let mut delete_responses = response.deletes.into_iter();
+                for mut operation in self.delete_inflight.drain(..) {
+                    match delete_responses.next() {
+                        Some(delete_response) => operation.complete(delete_response),
+                        None => operation.complete_exception(UnexpectedStatus(
+                            "missing delete response from server".to_string(),
+                        )),
+                    }
                 }
-                for (mut operation, delete_range_response) in self
-                    .delete_range_inflight
-                    .drain(..)
-                    .zip(response.delete_ranges.into_iter())
-                {
-                    operation.complete(delete_range_response);
+                let mut delete_range_responses = response.delete_ranges.into_iter();
+                for mut operation in self.delete_range_inflight.drain(..) {
+                    match delete_range_responses.next() {
+                        Some(delete_range_response) => operation.complete(delete_range_response),
+                        None => operation.complete_exception(UnexpectedStatus(
+                            "missing delete_range response from server".to_string(),
+                        )),
+                    }
                 }
             }
             Err(err) => {

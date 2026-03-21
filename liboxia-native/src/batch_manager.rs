@@ -27,10 +27,20 @@ impl Batcher {
         shard_manager: Arc<ShardManager>,
         provider_manager: Arc<ProviderManager>,
         write_stream_manager: Arc<WriteStreamManager>,
+        max_requests_per_batch: u32,
     ) -> Batch {
         match self {
-            Batcher::Read => Batch::Read(ReadBatch::new(shard_id, shard_manager, provider_manager)),
-            Batcher::Write => Batch::Write(WriteBatch::new(shard_id, write_stream_manager)),
+            Batcher::Read => Batch::Read(ReadBatch::new(
+                shard_id,
+                shard_manager,
+                provider_manager,
+                max_requests_per_batch,
+            )),
+            Batcher::Write => Batch::Write(WriteBatch::new(
+                shard_id,
+                write_stream_manager,
+                max_requests_per_batch,
+            )),
         }
     }
 }
@@ -48,6 +58,7 @@ impl Drop for BatchManager {
 }
 
 impl BatchManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shard_id: i64,
         batcher: Batcher,
@@ -55,7 +66,8 @@ impl BatchManager {
         provider_manager: Arc<ProviderManager>,
         write_stream_manager: Arc<WriteStreamManager>,
         batch_linger: Duration,
-        batch_max_size: u32,
+        _batch_max_size: u32,
+        max_requests_per_batch: u32,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let context = CancellationToken::new();
@@ -68,7 +80,7 @@ impl BatchManager {
             provider_manager,
             write_stream_manager,
             batch_linger,
-            batch_max_size,
+            max_requests_per_batch,
         ));
         BatchManager {
             context,
@@ -106,7 +118,7 @@ async fn start_batcher(
     provider_manager: Arc<ProviderManager>,
     write_stream_manager: Arc<WriteStreamManager>,
     batch_linger: Duration,
-    _batch_max_size: u32,
+    max_requests_per_batch: u32,
 ) {
     let mut buffer = Vec::new();
     let mut batch = batcher.create_batch(
@@ -114,6 +126,7 @@ async fn start_batcher(
         shard_manager.clone(),
         provider_manager.clone(),
         write_stream_manager.clone(),
+        max_requests_per_batch,
     );
     let mut interval = interval(batch_linger);
     loop {
@@ -127,7 +140,7 @@ async fn start_batcher(
                    continue
                 }
                 batch.flush().await;
-                batch = batcher.create_batch( shard_id, shard_manager.clone(), provider_manager.clone(), write_stream_manager.clone());
+                batch = batcher.create_batch( shard_id, shard_manager.clone(), provider_manager.clone(), write_stream_manager.clone(), max_requests_per_batch);
             }
             size = rx.recv_many(&mut buffer, usize::MAX) => {
                 if size == 0 {
@@ -137,7 +150,7 @@ async fn start_batcher(
                 for operation  in buffer.drain(..) {
                     if !batch.can_add(&operation) {
                         batch.flush().await;
-                        batch = batcher.create_batch( shard_id, shard_manager.clone(), provider_manager.clone(), write_stream_manager.clone());
+                        batch = batcher.create_batch( shard_id, shard_manager.clone(), provider_manager.clone(), write_stream_manager.clone(), max_requests_per_batch);
                         interval.reset();
                     }
                     batch.add(operation);

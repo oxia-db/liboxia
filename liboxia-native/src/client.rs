@@ -516,6 +516,7 @@ impl OxiaClient {
                 self.inner.write_stream_manager.clone(),
                 self.inner.options.batch_linger,
                 self.inner.options.batch_max_size,
+                self.inner.options.max_requests_per_batch,
             ))
         };
         let ref_mut = match batcher {
