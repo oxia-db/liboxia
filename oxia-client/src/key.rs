@@ -1,41 +1,35 @@
 use std::cmp::Ordering;
 
+/// Compares two keys using Oxia's slash-aware ordering.
+///
+/// This must match the server and every other Oxia client — it is a direct port
+/// of the Go reference `common/compare.CompareWithSlash`. Comparison proceeds
+/// segment by segment, splitting on `/`; at any level a key with no further `/`
+/// sorts *before* one that has a deeper segment, regardless of the remaining
+/// bytes. `list` and `range_scan` merge per-shard results with this order, so it
+/// has to agree with the server exactly.
 pub fn compare(mut a: &str, mut b: &str) -> Ordering {
-    loop {
-        let idx_a = a.find('/');
-        let idx_b = b.find('/');
-        match (idx_a, idx_b) {
-            (None, None) => {
-                return a.cmp(b);
-            }
-            (None, Some(_)) => {
-                let b_span = &b[..idx_b.unwrap()];
-                let span_res = a.cmp(b_span);
-                if span_res != Ordering::Equal {
-                    return span_res;
-                }
-                return Ordering::Less;
-            }
-            (Some(_), None) => {
-                let a_span = &a[..idx_a.unwrap()];
-                let span_res = a_span.cmp(b);
-                if span_res != Ordering::Equal {
-                    return span_res;
-                }
-                return Ordering::Greater;
-            }
+    while !a.is_empty() && !b.is_empty() {
+        match (a.find('/'), b.find('/')) {
+            // Neither has a further separator: plain byte-wise comparison.
+            (None, None) => return a.cmp(b),
+            // The side that ends first (no more `/`) sorts before the deeper one,
+            // independent of the bytes — this is the crux of the ordering.
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            // Both have another segment: compare this segment, else descend.
             (Some(ia), Some(ib)) => {
-                let span_a = &a[..ia];
-                let span_b = &b[..ib];
-                let span_res = span_a.cmp(span_b);
-                if span_res != Ordering::Equal {
-                    return span_res;
+                let span = a[..ia].cmp(&b[..ib]);
+                if span != Ordering::Equal {
+                    return span;
                 }
                 a = &a[ia + 1..];
                 b = &b[ib + 1..];
             }
         }
     }
+    // One side is exhausted: the shorter key sorts first.
+    a.len().cmp(&b.len())
 }
 #[cfg(test)]
 mod tests {
@@ -78,8 +72,35 @@ mod tests {
     fn test_empty_segments() {
         assert_eq!(compare("a//c", "a/b/c"), Ordering::Less);
         assert_eq!(compare("a/b", "a/b/"), Ordering::Less);
-        assert_eq!(compare("a//", "a/b"), Ordering::Less);
+        // "a//" descends to "/" vs "b": "/" has a further segment, "b" does not,
+        // so "a//" sorts after "a/b". (Matches the Go reference; the pre-fix
+        // implementation wrongly returned Less by comparing bytes first.)
+        assert_eq!(compare("a//", "a/b"), Ordering::Greater);
         assert_eq!(compare("", "a/b"), Ordering::Less);
+    }
+
+    /// Vectors copied verbatim from the Go reference
+    /// (`common/compare/compare_with_slash_test.go`). If these diverge, this
+    /// client orders `list`/`range_scan` results differently from the server and
+    /// every other Oxia client.
+    #[test]
+    fn matches_go_compare_with_slash_vectors() {
+        assert_eq!(compare("aaaaa", "aaaaa"), Ordering::Equal);
+        assert_eq!(compare("aaaaa", "zzzzz"), Ordering::Less);
+        assert_eq!(compare("bbbbb", "aaaaa"), Ordering::Greater);
+        assert_eq!(compare("aaaaa", ""), Ordering::Greater);
+        assert_eq!(compare("", "aaaaaa"), Ordering::Less);
+        assert_eq!(compare("", ""), Ordering::Equal);
+        assert_eq!(compare("aaaaa", "aaaaaaaaaaa"), Ordering::Less);
+        assert_eq!(compare("aaaaaaaaaaa", "aaa"), Ordering::Greater);
+        assert_eq!(compare("a", "/"), Ordering::Less);
+        assert_eq!(compare("/", "a"), Ordering::Greater);
+        assert_eq!(compare("/aaaa", "/bbbbb"), Ordering::Less);
+        assert_eq!(compare("/aaaa", "/aa/a"), Ordering::Less);
+        assert_eq!(compare("/aaaa/a", "/aaaa/b"), Ordering::Less);
+        assert_eq!(compare("/aaaa/a/a", "/bbbbbbbbbb"), Ordering::Greater);
+        assert_eq!(compare("/aaaa/a/a", "/aaaa/bbbbbbbbbb"), Ordering::Greater);
+        assert_eq!(compare("/a/b/a/a/a", "/a/b/a/b"), Ordering::Greater);
     }
 
     #[test]
