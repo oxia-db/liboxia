@@ -20,6 +20,7 @@ dashmap = { workspace = true }
 xxhash-rust = { workspace = true }
 uuid = { workspace = true }
 tokio-util = { workspace = true }
+arc-swap = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
