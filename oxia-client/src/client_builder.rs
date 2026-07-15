@@ -8,6 +8,18 @@ use std::time::Duration;
 
 /// Configures and creates an [`OxiaClient`].
 ///
+/// | Option | Default |
+/// |---|---|
+/// | [`service_address`](OxiaClientBuilder::service_address) | `127.0.0.1:6648` |
+/// | [`namespace`](OxiaClientBuilder::namespace) | `default` |
+/// | [`identity`](OxiaClientBuilder::identity) | random UUID |
+/// | [`batch_linger`](OxiaClientBuilder::batch_linger) | 5 ms |
+/// | [`batch_max_size`](OxiaClientBuilder::batch_max_size) | 128 KiB |
+/// | [`max_requests_per_batch`](OxiaClientBuilder::max_requests_per_batch) | 1000 |
+/// | [`session_timeout`](OxiaClientBuilder::session_timeout) | 15 s |
+/// | [`session_keep_alive`](OxiaClientBuilder::session_keep_alive) | `session_timeout / 10` |
+/// | [`request_timeout`](OxiaClientBuilder::request_timeout) | 30 s |
+///
 /// ```no_run
 /// # async fn example() -> Result<(), oxia::OxiaError> {
 /// use oxia::OxiaClient;

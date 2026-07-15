@@ -107,8 +107,12 @@ impl<T: MergeItem + Unpin> Stream for Merged<T> {
 /// An ordered stream of keys produced by
 /// [`ListBuilder::stream`](crate::ListBuilder::stream).
 ///
-/// Yields keys in Oxia's slash-aware key order, merged across shards, with
-/// bounded memory. Ends after yielding an error.
+/// Yields keys in the server's global (slash-aware) key order, merged across
+/// shards while buffering at most one pending key per shard. The stream has
+/// no overall deadline; it is naturally backpressured — keys are pulled from
+/// the server only as fast as they are consumed. The first error is yielded
+/// as an `Err` item and terminates the stream. Dropping the stream cancels
+/// the underlying RPCs.
 pub struct ListStream {
     inner: Merged<String>,
 }
@@ -136,8 +140,13 @@ impl fmt::Debug for ListStream {
 /// An ordered stream of records produced by
 /// [`RangeScanBuilder::stream`](crate::RangeScanBuilder::stream).
 ///
-/// Yields records in Oxia's slash-aware key order, merged across shards, with
-/// bounded memory. Ends after yielding an error.
+/// Yields records in the server's global (slash-aware) key order, merged
+/// across shards while buffering at most one pending record per shard — a
+/// scan of any size runs in O(shards) memory. The stream has no overall
+/// deadline; it is naturally backpressured — records are pulled from the
+/// server only as fast as they are consumed. The first error is yielded as an
+/// `Err` item and terminates the stream. Dropping the stream cancels the
+/// underlying RPCs.
 pub struct RangeScanStream {
     inner: Merged<GetResult>,
 }
@@ -165,8 +174,12 @@ impl fmt::Debug for RangeScanStream {
 /// A subscription to database change notifications, created with
 /// [`OxiaClient::notifications`](crate::OxiaClient::notifications).
 ///
-/// Consume it with [`recv`](Notifications::recv) or as a [`Stream`]. Dropping
-/// it releases the subscription.
+/// Consume it with [`recv`](Notifications::recv) or as a [`Stream`].
+/// Notifications from the same shard arrive in the order the changes were
+/// applied; interleaving across shards is unspecified. The subscription
+/// survives connection loss: each per-shard listener reconnects and resumes
+/// from its last delivered offset. Dropping the handle releases the
+/// subscription.
 #[derive(Debug)]
 pub struct Notifications {
     rx: mpsc::Receiver<Notification>,
@@ -177,7 +190,10 @@ impl Notifications {
         Notifications { rx }
     }
 
-    /// Receives the next notification; `None` once the client is closed.
+    /// Receives the next notification.
+    ///
+    /// Returns `None` once the client is closed. Cancel-safe: dropping the
+    /// returned future loses no notification.
     pub async fn recv(&mut self) -> Option<Notification> {
         self.rx.recv().await
     }
@@ -194,8 +210,11 @@ impl Stream for Notifications {
 /// A subscription to sequence advances, created with
 /// [`OxiaClient::sequence_updates`](crate::OxiaClient::sequence_updates).
 ///
-/// Yields the highest assigned sequence key each time the sequence advances.
-/// Consume it with [`recv`](SequenceUpdates::recv) or as a [`Stream`].
+/// Yields the highest assigned sequence key each time the sequence advances;
+/// rapid advances may be coalesced into one delivery carrying the highest
+/// key. The subscription survives connection loss and re-subscribes
+/// automatically. Consume it with [`recv`](SequenceUpdates::recv) or as a
+/// [`Stream`]; dropping the handle releases the subscription.
 #[derive(Debug)]
 pub struct SequenceUpdates {
     rx: mpsc::Receiver<String>,
@@ -206,7 +225,10 @@ impl SequenceUpdates {
         SequenceUpdates { rx }
     }
 
-    /// Receives the next sequence key; `None` once the client is closed.
+    /// Receives the next sequence key.
+    ///
+    /// Returns `None` once the client is closed. Cancel-safe: dropping the
+    /// returned future loses no update.
     pub async fn recv(&mut self) -> Option<String> {
         self.rx.recv().await
     }

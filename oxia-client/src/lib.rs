@@ -52,6 +52,23 @@
 //!
 //! Keys are sorted with Oxia's slash-aware order (`/`-separated path segments),
 //! not plain lexicographic order; range boundaries follow it.
+//!
+//! # Error handling
+//!
+//! Every operation returns [`OxiaError`]. Semantic outcomes callers commonly
+//! match on are dedicated variants ([`OxiaError::KeyNotFound`],
+//! [`OxiaError::UnexpectedVersionId`], …); transient infrastructure failures
+//! answer `true` to [`OxiaError::is_retryable`] and are safe to retry —
+//! idempotent operations unconditionally, non-idempotent ones (puts without a
+//! version condition) with application-level judgment. Each operation on
+//! [`OxiaClient`] documents the errors it can produce.
+//!
+//! # Cancellation
+//!
+//! Dropping an operation's future stops waiting but does not recall an
+//! operation already submitted to a batch; it may still execute on the
+//! server. The `recv` methods on [`Notifications`] and [`SequenceUpdates`]
+//! are cancel-safe.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
