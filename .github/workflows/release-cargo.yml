@@ -40,6 +40,11 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
 
+      # Same concurrent-pull-race guard as in ci.yml: the dockerized tests all
+      # pull this image at once on a cold runner unless it is already present.
+      - name: Pre-pull Oxia test image
+        run: docker pull oxia/oxia:main
+
       - name: Run tests
         run: cargo test --workspace
 

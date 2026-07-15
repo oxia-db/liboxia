@@ -1100,7 +1100,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "oxia-client"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "oxia-client-ffi"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "libc",
  "oxia-client",
