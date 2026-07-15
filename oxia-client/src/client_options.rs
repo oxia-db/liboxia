@@ -10,12 +10,14 @@ pub struct OxiaClientOptions {
     pub namespace: String,
     /// Client identity string, used for ephemeral record tracking.
     pub identity: String,
-    /// Wait time before sending a batch (default: 5ms).
-    pub batch_linger: Duration,
     /// Maximum batch size in bytes (default: 128KB).
     pub batch_max_size: u32,
     /// Maximum number of requests per batch (default: 1000).
     pub max_requests_per_batch: u32,
+    /// Maximum write batches in flight per shard (default: 4).
+    pub max_write_batches_in_flight: u32,
+    /// Maximum concurrent read batches per shard (default: 4).
+    pub max_read_batches_in_flight: u32,
     /// Session timeout for ephemeral records (default: 15s).
     pub session_timeout: Duration,
     /// Interval between session keep-alive heartbeats (default: `session_timeout / 10`).
@@ -30,9 +32,10 @@ impl Default for OxiaClientOptions {
             service_address: String::from("http://127.0.0.1:6648"),
             namespace: String::from("default"),
             identity: Uuid::new_v4().to_string(),
-            batch_linger: Duration::from_millis(5),
             batch_max_size: 128 * 1024,
             max_requests_per_batch: 1000,
+            max_write_batches_in_flight: 4,
+            max_read_batches_in_flight: 4,
             session_timeout: Duration::from_secs(15),
             session_keep_alive: Duration::from_secs(15) / 10,
             request_timeout: Duration::from_secs(30),

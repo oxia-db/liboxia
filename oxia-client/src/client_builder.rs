@@ -13,9 +13,10 @@ use std::time::Duration;
 /// | [`service_address`](OxiaClientBuilder::service_address) | `127.0.0.1:6648` |
 /// | [`namespace`](OxiaClientBuilder::namespace) | `default` |
 /// | [`identity`](OxiaClientBuilder::identity) | random UUID |
-/// | [`batch_linger`](OxiaClientBuilder::batch_linger) | 5 ms |
 /// | [`batch_max_size`](OxiaClientBuilder::batch_max_size) | 128 KiB |
 /// | [`max_requests_per_batch`](OxiaClientBuilder::max_requests_per_batch) | 1000 |
+/// | [`max_write_batches_in_flight`](OxiaClientBuilder::max_write_batches_in_flight) | 4 |
+/// | [`max_read_batches_in_flight`](OxiaClientBuilder::max_read_batches_in_flight) | 4 |
 /// | [`session_timeout`](OxiaClientBuilder::session_timeout) | 15 s |
 /// | [`session_keep_alive`](OxiaClientBuilder::session_keep_alive) | `session_timeout / 10` |
 /// | [`request_timeout`](OxiaClientBuilder::request_timeout) | 30 s |
@@ -40,9 +41,10 @@ pub struct OxiaClientBuilder {
     service_address: Option<String>,
     namespace: Option<String>,
     identity: Option<String>,
-    batch_linger: Option<Duration>,
     batch_max_size: Option<u32>,
     max_requests_per_batch: Option<u32>,
+    max_write_batches_in_flight: Option<u32>,
+    max_read_batches_in_flight: Option<u32>,
     session_timeout: Option<Duration>,
     session_keep_alive: Option<Duration>,
     request_timeout: Option<Duration>,
@@ -74,10 +76,23 @@ impl OxiaClientBuilder {
         self
     }
 
-    /// How long an incomplete batch may wait for more operations before being
-    /// sent (default: 5ms).
-    pub fn batch_linger(mut self, batch_linger: Duration) -> Self {
-        self.batch_linger = Some(batch_linger);
+    /// The maximum number of write batches in flight per shard (default: 4).
+    ///
+    /// Batching is rate-adaptive: while fewer batches are outstanding on a
+    /// shard's write stream, operations are dispatched almost immediately;
+    /// once the window is exhausted, the open batch accumulates operations, so
+    /// batch size automatically tracks the server's service rate. Must be at
+    /// least 1.
+    pub fn max_write_batches_in_flight(mut self, max: u32) -> Self {
+        self.max_write_batches_in_flight = Some(max);
+        self
+    }
+
+    /// The maximum number of concurrent read batches per shard (default: 4).
+    /// Works like [`max_write_batches_in_flight`](Self::max_write_batches_in_flight),
+    /// bounding the read RPCs outstanding per shard. Must be at least 1.
+    pub fn max_read_batches_in_flight(mut self, max: u32) -> Self {
+        self.max_read_batches_in_flight = Some(max);
         self
     }
 
@@ -124,14 +139,17 @@ impl OxiaClientBuilder {
         if let Some(identity) = self.identity {
             options.identity = identity;
         }
-        if let Some(batch_linger) = self.batch_linger {
-            options.batch_linger = batch_linger;
-        }
         if let Some(batch_max_size) = self.batch_max_size {
             options.batch_max_size = batch_max_size;
         }
         if let Some(max_requests_per_batch) = self.max_requests_per_batch {
             options.max_requests_per_batch = max_requests_per_batch;
+        }
+        if let Some(max) = self.max_write_batches_in_flight {
+            options.max_write_batches_in_flight = max;
+        }
+        if let Some(max) = self.max_read_batches_in_flight {
+            options.max_read_batches_in_flight = max;
         }
         if let Some(session_timeout) = self.session_timeout {
             options.session_timeout = session_timeout;
@@ -153,7 +171,13 @@ impl OxiaClientBuilder {
     /// unreachable, the namespace does not exist, or the first shard
     /// assignments cannot be obtained.
     pub async fn build(self) -> Result<OxiaClient, OxiaError> {
-        OxiaClient::new(self.assemble_options()).await
+        let options = self.assemble_options();
+        if options.max_write_batches_in_flight == 0 || options.max_read_batches_in_flight == 0 {
+            return Err(OxiaError::InvalidArgument(
+                "max batches in flight must be at least 1".to_string(),
+            ));
+        }
+        OxiaClient::new(options).await
     }
 }
 

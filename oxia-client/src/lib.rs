@@ -24,8 +24,8 @@
 //! let floor = client.get("config/z").comparison(ComparisonType::Floor).await?;
 //!
 //! // Range operations, as a whole result or as an ordered stream.
-//! let keys = client.list("config/", "config0").await?;
-//! let mut scan = client.range_scan("config/", "config0").stream().await?;
+//! let keys = client.list("config/", "config/~").await?;
+//! let mut scan = client.range_scan("config/", "config/~").stream().await?;
 //! # let _ = (floor, keys, scan);
 //! client.close().await?;
 //! # Ok(())
@@ -75,8 +75,7 @@
 #![allow(clippy::result_large_err)]
 
 mod address;
-mod batch;
-mod batch_manager;
+mod batcher;
 mod client;
 mod client_builder;
 mod client_options;
@@ -94,8 +93,6 @@ mod shard_manager;
 mod status;
 mod streams;
 mod types;
-mod write_stream;
-mod write_stream_manager;
 
 #[allow(
     clippy::derive_partial_eq_without_eq,

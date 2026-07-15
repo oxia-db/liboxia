@@ -722,8 +722,9 @@ async fn test_client_builder_options() {
         .service_address(address)
         .namespace("default".to_string())
         .identity("test-client".to_string())
-        .batch_linger(Duration::from_millis(10))
         .batch_max_size(256 * 1024)
+        .max_write_batches_in_flight(2)
+        .max_read_batches_in_flight(2)
         .session_timeout(Duration::from_secs(30))
         .request_timeout(Duration::from_secs(15))
         .build()
@@ -868,7 +869,15 @@ async fn test_get_without_value() {
 #[tokio::test]
 async fn test_large_value() {
     let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    // A 1MiB value exceeds the default 128KiB batch_max_size (which would
+    // reject it with RequestTooLarge); raise the limit for this client.
+    let client = OxiaClientBuilder::new()
+        .service_address(address.clone())
+        .batch_max_size(2 * 1024 * 1024)
+        .request_timeout(Duration::from_secs(10))
+        .build()
+        .await
+        .unwrap();
 
     // 1MB value
     let large_value: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
@@ -1630,4 +1639,112 @@ async fn build_fails_fast_when_cluster_unreachable() {
         Ok(Err(_)) => {}
         Err(_) => panic!("build hung instead of failing fast within the request timeout"),
     }
+}
+
+// ============================================================
+// Adaptive Batching Tests (P1-9 / P1-10)
+// ============================================================
+
+/// A single write larger than `batch_max_size` is rejected client-side.
+#[tokio::test]
+async fn test_put_larger_than_max_batch_size_is_rejected() {
+    let (_container, address) = start_oxia().await;
+    let client = OxiaClientBuilder::new()
+        .service_address(address)
+        .batch_max_size(1024)
+        .build()
+        .await
+        .unwrap();
+
+    let result = client.put("too/large", vec![0u8; 4096]).await;
+    assert!(matches!(result, Err(OxiaError::RequestTooLarge)));
+
+    // The client is still fully usable afterwards.
+    client.put("too/small", b"ok".to_vec()).await.unwrap();
+    let got = client.get("too/small").await.unwrap();
+    assert_eq!(got.value.as_deref(), Some(b"ok".as_ref()));
+    client.close().await.unwrap();
+}
+
+/// Writes exceeding the batch byte limit split across batches and all land.
+#[tokio::test]
+async fn test_batches_split_at_byte_limit() {
+    let (_container, address) = start_oxia().await;
+    let client = OxiaClientBuilder::new()
+        .service_address(address)
+        // Each value below is 4KiB, so at most two writes fit per batch.
+        .batch_max_size(10 * 1024)
+        .build()
+        .await
+        .unwrap();
+
+    let puts: Vec<_> = (0..20)
+        .map(|i| client.put(format!("split/{i:02}"), vec![b'x'; 4096]))
+        .collect();
+    for put in puts {
+        put.await.unwrap();
+    }
+    let keys = client.list("split/", "split/~").await.unwrap();
+    assert_eq!(keys.len(), 20);
+    client.close().await.unwrap();
+}
+
+/// With a window of one batch in flight, heavy concurrent traffic to the same
+/// shard coalesces into growing batches; everything must complete in order and
+/// nothing may be lost.
+#[tokio::test]
+async fn test_adaptive_window_of_one_under_concurrency() {
+    let (_container, address) = start_oxia().await;
+    let client = OxiaClientBuilder::new()
+        .service_address(address)
+        .max_write_batches_in_flight(1)
+        .max_read_batches_in_flight(1)
+        .build()
+        .await
+        .unwrap();
+
+    // Same partition key => same shard => one dispatch window.
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..200 {
+        let client = client.clone();
+        tasks.spawn(async move {
+            client
+                .put(format!("window/{i:03}"), format!("v{i}").into_bytes())
+                .partition_key("window-pk")
+                .await
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap().unwrap();
+    }
+
+    // Sequential writes to one key through the same window preserve order:
+    // the last write must win.
+    for i in 0..50 {
+        client
+            .put("window/counter", format!("{i}").into_bytes())
+            .partition_key("window-pk")
+            .await
+            .unwrap();
+    }
+    let got = client
+        .get("window/counter")
+        .partition_key("window-pk")
+        .await
+        .unwrap();
+    assert_eq!(got.value.as_deref(), Some(b"49".as_ref()));
+
+    // Reads batch through their own window of one.
+    let gets: Vec<_> = (0..200)
+        .map(|i| {
+            client
+                .get(format!("window/{i:03}"))
+                .partition_key("window-pk")
+        })
+        .collect();
+    for (i, get) in gets.into_iter().enumerate() {
+        let got = get.await.unwrap();
+        assert_eq!(got.value.as_deref(), Some(format!("v{i}").as_bytes()));
+    }
+    client.close().await.unwrap();
 }

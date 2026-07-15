@@ -1,11 +1,11 @@
 //! The Oxia client: construction, per-operation execution, and shutdown.
 
-use crate::batch_manager::{BatchManager, Batcher, BatcherContext};
+use crate::batcher::{BatcherDeps, ReadBatcher, WriteBatcher, WriteOp, pending_write};
 use crate::client_builder::OxiaClientBuilder;
 use crate::client_options::OxiaClientOptions;
 use crate::errors::OxiaError;
 use crate::notification_manager::NotificationManager;
-use crate::operations::{Operation, Pending};
+use crate::operations::Pending;
 use crate::proto;
 use crate::provider_manager::ProviderManager;
 use crate::requests::{
@@ -19,7 +19,6 @@ use crate::streams::{
     ListStream, Notifications, RangeScanStream, SequenceUpdates, ShardStream, merged,
 };
 use crate::types::{ComparisonType, GetResult};
-use crate::write_stream_manager::WriteStreamManager;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::StreamExt;
@@ -37,11 +36,11 @@ pub(crate) struct Inner {
     pub(crate) provider_manager: Arc<ProviderManager>,
     pub(crate) shard_manager: Arc<ShardManager>,
     pub(crate) session_manager: Arc<SessionManager>,
-    pub(crate) write_stream_manager: Arc<WriteStreamManager>,
+    batcher_deps: Arc<BatcherDeps>,
     notification_tasks: Mutex<Vec<NotificationManager>>,
     sequence_tasks: Mutex<Vec<SequenceUpdatesManager>>,
-    write_batchers: DashMap<i64, Arc<BatchManager>>,
-    read_batchers: DashMap<i64, Arc<BatchManager>>,
+    write_batchers: DashMap<i64, Arc<WriteBatcher>>,
+    read_batchers: DashMap<i64, Arc<ReadBatcher>>,
     closed: AtomicBool,
 }
 
@@ -120,12 +119,16 @@ impl OxiaClient {
             })
             .await?,
         );
-        let write_stream_manager = Arc::new(WriteStreamManager::new(
-            options.namespace.clone(),
-            shard_manager.clone(),
-            provider_manager.clone(),
-            options.request_timeout,
-        ));
+        let batcher_deps = Arc::new(BatcherDeps {
+            namespace: options.namespace.clone(),
+            shard_manager: shard_manager.clone(),
+            provider_manager: provider_manager.clone(),
+            max_batch_size: options.batch_max_size as usize,
+            max_requests_per_batch: options.max_requests_per_batch as usize,
+            max_write_batches_in_flight: options.max_write_batches_in_flight as usize,
+            max_read_batches_in_flight: options.max_read_batches_in_flight as usize,
+            request_timeout: options.request_timeout,
+        });
         let session_manager = Arc::new(SessionManager::new(
             options.identity.clone(),
             options.session_timeout,
@@ -140,7 +143,7 @@ impl OxiaClient {
                 provider_manager,
                 shard_manager,
                 session_manager,
-                write_stream_manager,
+                batcher_deps,
                 notification_tasks: Mutex::new(Vec::new()),
                 sequence_tasks: Mutex::new(Vec::new()),
                 write_batchers: DashMap::new(),
@@ -170,6 +173,8 @@ impl OxiaClient {
     /// - [`OxiaError::SessionExpired`] when an
     ///   [`ephemeral`](PutBuilder::ephemeral) put races a session expiry
     ///   (retrying creates a fresh session);
+    /// - [`OxiaError::RequestTooLarge`] when key + value exceed the maximum
+    ///   batch size ([`batch_max_size`](crate::OxiaClientBuilder::batch_max_size));
     /// - [`OxiaError::Timeout`] when the request timeout elapses;
     /// - [`OxiaError::Closed`] after [`close`](OxiaClient::close);
     /// - transient routing/transport errors
@@ -275,7 +280,7 @@ impl OxiaClient {
     /// ```no_run
     /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
     /// // Everything under the "config/" prefix:
-    /// client.delete_range("config/", "config0").await?;
+    /// client.delete_range("config/", "config/~").await?;
     /// # Ok(()) }
     /// ```
     pub fn delete_range(
@@ -310,7 +315,7 @@ impl OxiaClient {
     ///
     /// ```no_run
     /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
-    /// let keys = client.list("config/", "config0").await?;
+    /// let keys = client.list("config/", "config/~").await?;
     /// # Ok(()) }
     /// ```
     pub fn list(
@@ -348,7 +353,7 @@ impl OxiaClient {
     /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
     /// use futures::TryStreamExt;
     ///
-    /// let mut scan = client.range_scan("logs/", "logs0").stream().await?;
+    /// let mut scan = client.range_scan("logs/", "logs/~").stream().await?;
     /// while let Some(record) = scan.try_next().await? {
     ///     println!("{} => {:?}", record.key, record.value);
     /// }
@@ -467,12 +472,16 @@ impl OxiaClient {
         let mut first_err: Option<OxiaError> = None;
 
         // Flush and stop the batchers (writes first, so queued mutations land).
-        for batchers in [&self.inner.write_batchers, &self.inner.read_batchers] {
-            let shards: Vec<i64> = batchers.iter().map(|entry| *entry.key()).collect();
-            for shard in shards {
-                if let Some((_, batcher)) = batchers.remove(&shard) {
-                    track(&mut first_err, batcher.close().await, "batcher");
-                }
+        let write_shards: Vec<i64> = self.inner.write_batchers.iter().map(|e| *e.key()).collect();
+        for shard in write_shards {
+            if let Some((_, batcher)) = self.inner.write_batchers.remove(&shard) {
+                track(&mut first_err, batcher.close().await, "write batcher");
+            }
+        }
+        let read_shards: Vec<i64> = self.inner.read_batchers.iter().map(|e| *e.key()).collect();
+        for shard in read_shards {
+            if let Some((_, batcher)) = self.inner.read_batchers.remove(&shard) {
+                track(&mut first_err, batcher.close().await, "read batcher");
             }
         }
         for manager in self.inner.notification_tasks.lock().await.drain(..) {
@@ -481,11 +490,6 @@ impl OxiaClient {
         for manager in self.inner.sequence_tasks.lock().await.drain(..) {
             track(&mut first_err, manager.shutdown().await, "sequence updates");
         }
-        track(
-            &mut first_err,
-            self.inner.write_stream_manager.close().await,
-            "write streams",
-        );
         track(
             &mut first_err,
             self.inner.session_manager.close().await,
@@ -534,41 +538,50 @@ impl OxiaClient {
         self.inner.session_manager.get_session_id(shard).await
     }
 
-    /// Returns (creating on first use) the batcher of the given kind for a shard.
-    pub(crate) fn batcher(&self, kind: Batcher, shard_id: i64) -> Arc<BatchManager> {
-        let map = match kind {
-            Batcher::Read => &self.inner.read_batchers,
-            Batcher::Write => &self.inner.write_batchers,
-        };
-        map.entry(shard_id)
+    /// Returns (creating on first use) the write batcher for a shard.
+    fn write_batcher(&self, shard_id: i64) -> Arc<WriteBatcher> {
+        self.inner
+            .write_batchers
+            .entry(shard_id)
             .or_insert_with(|| {
-                Arc::new(BatchManager::new(
-                    kind.clone(),
-                    BatcherContext {
-                        shard_id,
-                        shard_manager: self.inner.shard_manager.clone(),
-                        provider_manager: self.inner.provider_manager.clone(),
-                        write_stream_manager: self.inner.write_stream_manager.clone(),
-                        batch_linger: self.inner.options.batch_linger,
-                        max_requests_per_batch: self.inner.options.max_requests_per_batch,
-                        request_timeout: self.inner.options.request_timeout,
-                    },
-                ))
+                Arc::new(WriteBatcher::new(shard_id, self.inner.batcher_deps.clone()))
             })
             .clone()
     }
 
-    /// Submits an operation to a shard's batcher and awaits its response,
-    /// bounded by the request timeout.
-    pub(crate) async fn submit<Req, Resp>(
+    /// Returns (creating on first use) the read batcher for a shard.
+    fn read_batcher(&self, shard_id: i64) -> Arc<ReadBatcher> {
+        self.inner
+            .read_batchers
+            .entry(shard_id)
+            .or_insert_with(|| {
+                Arc::new(ReadBatcher::new(shard_id, self.inner.batcher_deps.clone()))
+            })
+            .clone()
+    }
+
+    /// Submits a write to a shard's batcher and awaits its response, bounded
+    /// by the request timeout.
+    pub(crate) async fn submit_write<Req, Resp>(
         &self,
-        kind: Batcher,
         shard_id: i64,
         request: Req,
-        wrap: fn(Pending<Req, Resp>) -> Operation,
+        wrap: fn(Pending<Req, Resp>) -> WriteOp,
     ) -> Result<Resp, OxiaError> {
+        let (op, rx) = pending_write(request, wrap);
+        self.write_batcher(shard_id).add(op);
+        self.await_response(rx).await
+    }
+
+    /// Submits a get to a shard's batcher and awaits its response, bounded by
+    /// the request timeout.
+    pub(crate) async fn submit_get(
+        &self,
+        shard_id: i64,
+        request: proto::GetRequest,
+    ) -> Result<proto::GetResponse, OxiaError> {
         let (pending, rx) = Pending::new(request);
-        self.batcher(kind, shard_id).add(wrap(pending))?;
+        self.read_batcher(shard_id).add(pending);
         self.await_response(rx).await
     }
 
@@ -605,9 +618,7 @@ impl OxiaClient {
             let request = request.clone();
             join_set.spawn(async move {
                 let requested_key = request.key.clone();
-                let response = client
-                    .submit(Batcher::Read, shard, request, Operation::Get)
-                    .await?;
+                let response = client.submit_get(shard, request).await?;
                 check_status(response.status)?;
                 GetResult::from_proto(response, Some(requested_key))
             });
@@ -768,7 +779,7 @@ impl OxiaClient {
             let request = request.clone();
             join_set.spawn(async move {
                 let response = client
-                    .submit(Batcher::Write, shard, request, Operation::DeleteRange)
+                    .submit_write(shard, request, WriteOp::DeleteRange)
                     .await?;
                 check_status(response.status)
             });

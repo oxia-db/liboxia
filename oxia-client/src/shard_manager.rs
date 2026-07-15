@@ -245,6 +245,22 @@ impl ShardManager {
         Ok(())
     }
 
+    /// A manager with no assignments and no watcher, for unit tests of code
+    /// paths that never resolve a leader.
+    #[cfg(test)]
+    pub(crate) fn detached_for_tests() -> Arc<Self> {
+        Arc::new(ShardManager {
+            inner: Arc::new(Inner {
+                provider_manager: Arc::new(crate::provider_manager::ProviderManager::new(
+                    std::time::Duration::from_secs(1),
+                )),
+                assignments: ArcSwap::from_pointee(Assignments::empty()),
+            }),
+            context: CancellationToken::new(),
+            assignment_handle: Mutex::new(None),
+        })
+    }
+
     pub fn get_leader(&self, shard_id: i64) -> Option<Node> {
         self.inner
             .assignments
