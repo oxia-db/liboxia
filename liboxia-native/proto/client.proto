@@ -1,4 +1,4 @@
-// Copyright 2023 StreamNative, Inc.
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,9 +17,9 @@
  */
 syntax = "proto3";
 
-package io.streamnative.oxia.proto;
+package io.oxia.proto.v1;
 
-option go_package = "github.com/oxia-db/oxia/proto";
+option go_package = "github.com/oxia-db/oxia/common/proto";
 option java_multiple_files = true;
 
 /**
@@ -128,6 +128,7 @@ message ShardAssignmentsRequest {
  */
 message ShardAssignments {
   map<string, NamespaceShardsAssignment> namespaces = 1;
+  repeated string allowed_authorities = 2;
 }
 
 /**
@@ -264,6 +265,11 @@ message PutRequest {
   repeated uint64 sequence_key_delta = 7;
 
   repeated SecondaryIndex secondary_indexes = 8;
+
+  // Optional overrides for version metadata, used during data migration.
+  // When set, the server will use these values instead of auto-generating them.
+  optional int64 override_version_id = 9;
+  optional int64 override_modifications_count = 10;
 }
 
 /**
@@ -377,6 +383,8 @@ message ListRequest {
   string end_exclusive = 3;
 
   optional string secondary_index_name = 4;
+
+  bool include_internal_keys = 5;
 }
 
 /**
@@ -400,6 +408,8 @@ message RangeScanRequest {
   string end_exclusive = 3;
 
   optional string secondary_index_name = 4;
+
+  bool include_internal_keys = 5;
 }
 
 /**
@@ -497,7 +507,20 @@ message NotificationBatch {
   int64 offset = 2;
   fixed64 timestamp = 3;
 
-  map<string, Notification> notifications = 4;
+  // Wire-compatible with the former `map<string, Notification>` field: a map
+  // entry encodes exactly as NotificationEntry{key = 1, value = 2}. The
+  // server emits entries sorted by key, because the serialized batch feeds
+  // the replicated checksum and must be byte-identical on every replica —
+  // generated marshalers emit repeated fields in slice order, which makes
+  // that determinism structural instead of requiring a special marshaler.
+  repeated NotificationEntry notifications = 4;
+}
+
+message NotificationEntry {
+  // optional: presence-tracked, so the field is emitted even for an empty
+  // key, exactly as a map entry encodes it
+  optional string key = 1;
+  Notification value = 2;
 }
 
 message Notification {

@@ -20,7 +20,7 @@ mod write_stream_manager;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 pub mod oxia {
-    include!(concat!(env!("OUT_DIR"), "/io.streamnative.oxia.proto.rs"));
+    include!(concat!(env!("OUT_DIR"), "/io.oxia.proto.v1.rs"));
 }
 
 // Convenience re-exports for common types

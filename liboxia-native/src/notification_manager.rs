@@ -108,8 +108,8 @@ async fn start_notification_listener(
                                 Error::transient(UnexpectedStatus(err.to_string()))
                             })?;
                             offset_ref.store(batch.offset, Ordering::Release);
-                            for notification_tuple in batch.notifications {
-                                    if sender.send(notification_tuple.into()).await.is_err() {
+                            for entry in batch.notifications {
+                                    if sender.send(entry.into()).await.is_err() {
                                         // Receiver dropped, stop listening
                                         return Ok(());
                                     }
