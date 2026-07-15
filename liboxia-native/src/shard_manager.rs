@@ -1,13 +1,15 @@
 use crate::address::ensure_protocol;
 use crate::errors::OxiaError;
 use crate::errors::OxiaError::UnexpectedStatus;
+use crate::hash::shard_key_hash;
 use crate::oxia::shard_assignment::ShardBoundaries;
-use crate::oxia::{ShardAssignment, ShardAssignmentsRequest};
+use crate::oxia::{ShardAssignment, ShardAssignmentsRequest, ShardKeyRouter};
 use crate::provider_manager::ProviderManager;
 use backoff::{Error, ExponentialBackoff};
 use dashmap::DashMap;
 use log::{info, warn};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
@@ -26,6 +28,9 @@ pub(crate) struct Node {
 struct Inner {
     provider_manager: Arc<ProviderManager>,
     current_assignments: Arc<DashMap<i64, ShardAssignment>>,
+    /// The [`ShardKeyRouter`] most recently advertised by the namespace, stored
+    /// as its raw enum value. Determines which hash routes keys to shards.
+    shard_key_router: AtomicI32,
 }
 
 pub struct ShardManager {
@@ -84,10 +89,14 @@ async fn start_assignments_listener(
                             if ns_assignments.is_none() {
                                     continue;
                             }
+                            let namespace_assignment = ns_assignments.unwrap();
                             assignments_ref.clear();
-                            for sa in &ns_assignments.unwrap().assignments {
+                            for sa in &namespace_assignment.assignments {
                                 assignments_ref.insert(sa.shard, sa.clone());
                             }
+                            local_inner
+                                .shard_key_router
+                                .store(namespace_assignment.shard_key_router, Ordering::Release);
                             if !init_sender.is_closed() {
                                 let _ = init_sender.send(()).await;
                             }
@@ -117,6 +126,7 @@ impl ShardManager {
         let inner = Arc::new(Inner {
             provider_manager: options.provider_manager,
             current_assignments: Arc::new(DashMap::new()),
+            shard_key_router: AtomicI32::new(ShardKeyRouter::Xxhash3 as i32),
         });
         let (init_tx, mut init_rx) = mpsc::channel(1);
         let assignment_handle = tokio::spawn(start_assignments_listener(
@@ -155,7 +165,7 @@ impl ShardManager {
     }
 
     pub fn get_shard(&self, key: &str) -> Option<i64> {
-        let code = xxhash_rust::xxh32::xxh32(key.as_bytes(), 0);
+        let code = shard_key_hash(self.inner.shard_key_router.load(Ordering::Acquire), key);
         for entry in self.inner.current_assignments.iter() {
             if let Some(boundaries) = entry.shard_boundaries.as_ref() {
                 match boundaries {
@@ -184,7 +194,7 @@ impl ShardManager {
     }
 
     pub fn get_shard_leader(&self, key: &str) -> Option<Node> {
-        let code = xxhash_rust::xxh32::xxh32(key.as_bytes(), 0);
+        let code = shard_key_hash(self.inner.shard_key_router.load(Ordering::Acquire), key);
         for entry in self.inner.current_assignments.iter() {
             if let Some(boundaries) = entry.shard_boundaries.as_ref() {
                 match boundaries {
