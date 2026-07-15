@@ -53,12 +53,18 @@ pub enum OxiaError {
     /// No leader is currently available for the shard (e.g. a leader election is
     /// in progress). Retryable.
     #[error("no leader available for shard {shard}")]
-    LeaderNotFound { shard: i64 },
+    LeaderNotFound {
+        /// The shard without a known leader.
+        shard: i64,
+    },
 
     /// No shard currently owns the key, because shard assignments have not been
     /// loaded yet or are momentarily incomplete. Retryable.
     #[error("no shard owns key {key:?} (assignments not ready)")]
-    NoShardForKey { key: String },
+    NoShardForKey {
+        /// The key that could not be routed.
+        key: String,
+    },
 
     /// The connection to a server was lost or could not be established, or an
     /// in-flight request's worker went away. Retryable.
@@ -135,16 +141,20 @@ mod tests {
         assert!(OxiaError::LeaderNotFound { shard: 1 }.is_retryable());
         assert!(OxiaError::NoShardForKey { key: "k".into() }.is_retryable());
         assert!(OxiaError::Disconnected("x".into()).is_retryable());
-        assert!(OxiaError::Grpc {
-            code: tonic::Code::Unavailable,
-            message: msg.clone(),
-        }
-        .is_retryable());
-        assert!(OxiaError::Grpc {
-            code: tonic::Code::Aborted,
-            message: msg.clone(),
-        }
-        .is_retryable());
+        assert!(
+            OxiaError::Grpc {
+                code: tonic::Code::Unavailable,
+                message: msg.clone(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            OxiaError::Grpc {
+                code: tonic::Code::Aborted,
+                message: msg.clone(),
+            }
+            .is_retryable()
+        );
 
         assert!(!OxiaError::KeyNotFound.is_retryable());
         assert!(!OxiaError::UnexpectedVersionId.is_retryable());
@@ -152,11 +162,13 @@ mod tests {
         assert!(!OxiaError::RequestTooLarge.is_retryable());
         assert!(!OxiaError::Timeout.is_retryable());
         assert!(!OxiaError::Closed.is_retryable());
-        assert!(!OxiaError::Grpc {
-            code: tonic::Code::NotFound,
-            message: msg,
-        }
-        .is_retryable());
+        assert!(
+            !OxiaError::Grpc {
+                code: tonic::Code::NotFound,
+                message: msg,
+            }
+            .is_retryable()
+        );
     }
 
     #[test]

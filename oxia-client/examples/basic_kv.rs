@@ -1,6 +1,7 @@
-use log::info;
-use oxia::client_builder::OxiaClientBuilder;
+use oxia::OxiaClient;
+use tracing::info;
 use tracing::level_filters::LevelFilter;
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -12,60 +13,43 @@ async fn main() {
         .with_target(false)
         .init();
 
-    let client = OxiaClientBuilder::new().build().await.unwrap();
-    let key1 = String::from("key1");
-    let key2 = String::from("key2");
-    let key3 = String::from("key3");
-    let payload = "payload".to_string().into_bytes();
-    // put key - 1
-    let put_result = client.put(key1.clone(), payload.clone()).await.unwrap();
-    info!(
-        "put the value. key {:?} value {:?} version {:?}",
-        put_result.key, payload, put_result.version
-    );
-    // put key - 2
-    let put_result = client.put(key2.clone(), payload.clone()).await.unwrap();
-    info!(
-        "put the value. key {:?} value {:?} version {:?}",
-        put_result.key, payload, put_result.version
-    );
-    // put key - 3
-    let put_result = client.put(key3.clone(), payload.clone()).await.unwrap();
-    info!(
-        "put the value. key {:?} value {:?} version {:?}",
-        put_result.key, payload, put_result.version
-    );
+    let client = OxiaClient::connect("localhost:6648").await.unwrap();
+    let payload = "payload";
+
+    for key in ["key1", "key2", "key3"] {
+        let put_result = client.put(key, payload).await.unwrap();
+        info!(
+            "put the value. key {:?} value {:?} version {:?}",
+            put_result.key, payload, put_result.version
+        );
+    }
+
     // list keys
-    let list_result = client.list("".to_string(), "/".to_string()).await.unwrap();
-    info!("list the keys. keys {:?}", list_result.keys);
+    let keys = client.list("", "/").await.unwrap();
+    info!("list the keys. keys {:?}", keys);
 
     // range-scan
-    let range_scan_result = client
-        .range_scan("".to_string(), "/".to_string())
-        .await
-        .unwrap();
-    info!("range_scan result: {:?}", range_scan_result);
+    let records = client.range_scan("", "/").await.unwrap();
+    info!("range_scan result: {:?}", records);
 
-    // get key-1
-    let get_result = client.get(key1.clone()).await.unwrap();
+    // get key1
+    let get_result = client.get("key1").await.unwrap();
     info!(
         "get the value. key {:?} value {:?} version {:?}",
         get_result.key, get_result.value, get_result.version
     );
-    // delete key-1
-    client.delete(key1.clone()).await.unwrap();
-    info!("deleted the key-1. key {:?} ", key1.clone());
-    let result = client.get(key1.clone()).await;
+
+    // delete key1
+    client.delete("key1").await.unwrap();
+    info!("deleted key1");
+    let result = client.get("key1").await;
     info!("get the value again. error: {:?}", result.unwrap_err());
 
     // delete range
-    client
-        .delete_range("".to_string(), "/".to_string())
-        .await
-        .unwrap();
+    client.delete_range("", "/").await.unwrap();
     info!("delete range keys.");
-    let list_result = client.list("".to_string(), "/".to_string()).await.unwrap();
-    info!("list the keys. keys {:?}", list_result.keys);
+    let keys = client.list("", "/").await.unwrap();
+    info!("list the keys. keys {:?}", keys);
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }

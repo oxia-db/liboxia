@@ -1,19 +1,19 @@
 use crate::address::ensure_protocol;
 use crate::errors::OxiaError;
 use crate::hash::shard_key_hash;
-use crate::oxia::shard_assignment::ShardBoundaries;
-use crate::oxia::{NamespaceShardsAssignment, ShardAssignmentsRequest, ShardKeyRouter};
+use crate::proto::shard_assignment::ShardBoundaries;
+use crate::proto::{NamespaceShardsAssignment, ShardAssignmentsRequest, ShardKeyRouter};
 use crate::provider_manager::ProviderManager;
-use crate::retry::{retry_until_cancelled, RetryError};
+use crate::retry::{RetryError, retry_until_cancelled};
 use arc_swap::ArcSwap;
-use log::info;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::codegen::tokio_stream::StreamExt;
+use tracing::info;
 
 pub struct ShardManagerOptions {
     pub address: String,
@@ -31,7 +31,6 @@ struct ShardRange {
     min_hash: u32,
     max_hash: u32,
     shard: i64,
-    leader: String,
 }
 
 /// An immutable snapshot of a namespace's shard assignments.
@@ -68,7 +67,6 @@ impl Assignments {
                     min_hash: range.min_hash_inclusive,
                     max_hash: range.max_hash_inclusive,
                     shard: sa.shard,
-                    leader: sa.leader.clone(),
                 });
             }
         }
@@ -236,7 +234,7 @@ impl ShardManager {
         })
     }
 
-    pub async fn shutdown(self) -> Result<(), OxiaError> {
+    pub async fn close(&self) -> Result<(), OxiaError> {
         self.context.cancel();
         let mut handle_guard = self.assignment_handle.lock().await;
         if let Some(handle) = handle_guard.take() {
@@ -264,28 +262,15 @@ impl ShardManager {
         snapshot.shard_for_hash(code).map(|r| r.shard)
     }
 
-    pub fn get_shards_leader(&self) -> HashMap<i64, Node> {
-        let snapshot = self.inner.assignments.load();
-        snapshot
+    /// The ids of all shards in the namespace, per the current assignments.
+    pub fn get_shard_ids(&self) -> Vec<i64> {
+        self.inner
+            .assignments
+            .load()
             .leaders
-            .iter()
-            .map(|(shard, leader)| {
-                (
-                    *shard,
-                    Node {
-                        service_address: ensure_protocol(leader.clone()),
-                    },
-                )
-            })
+            .keys()
+            .copied()
             .collect()
-    }
-
-    pub fn get_shard_leader(&self, key: &str) -> Option<Node> {
-        let snapshot = self.inner.assignments.load();
-        let code = shard_key_hash(snapshot.shard_key_router, key);
-        snapshot.shard_for_hash(code).map(|r| Node {
-            service_address: ensure_protocol(r.leader.clone()),
-        })
     }
 }
 
@@ -298,7 +283,6 @@ mod tests {
             min_hash: min,
             max_hash: max,
             shard,
-            leader: format!("leader-{shard}"),
         }
     }
 

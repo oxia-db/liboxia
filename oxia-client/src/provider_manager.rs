@@ -1,5 +1,5 @@
 use crate::errors::OxiaError;
-use crate::oxia::oxia_client_client::OxiaClientClient;
+use crate::proto::oxia_client_client::OxiaClientClient;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,8 +50,8 @@ impl ProviderManager {
         }
     }
 
-    pub async fn shutdown(self) -> Result<(), OxiaError> {
+    /// Drops all cached connections.
+    pub fn clear(&self) {
         self.providers.clear();
-        Ok(())
     }
 }

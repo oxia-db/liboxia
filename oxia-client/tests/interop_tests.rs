@@ -6,7 +6,7 @@
 //! single-shard get, so if the two clients hashed keys differently, Go would
 //! look on the wrong shard and fail to find records the Rust client wrote.
 
-use oxia::client_builder::OxiaClientBuilder;
+use oxia::{OxiaClient, OxiaClientBuilder};
 use std::time::Duration;
 use testcontainers::core::ports::ContainerPort;
 use testcontainers::core::wait::WaitFor;
@@ -46,7 +46,7 @@ async fn start_oxia_multishard() -> (ContainerAsync<GenericImage>, String) {
     (container, format!("http://127.0.0.1:{}", host_port))
 }
 
-async fn new_client(address: &str) -> oxia::client::OxiaClient {
+async fn new_client(address: &str) -> OxiaClient {
     OxiaClientBuilder::new()
         .service_address(address.to_string())
         .request_timeout(Duration::from_secs(10))
@@ -94,7 +94,7 @@ async fn rust_writes_go_reads_across_shards() {
         assert_eq!(got, expected, "Go CLI read the wrong value for {key}");
     }
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 /// The Go CLI writes across shards; the Rust client must read every value back,
@@ -121,5 +121,5 @@ async fn go_writes_rust_reads_across_shards() {
         );
     }
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }

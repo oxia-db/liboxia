@@ -1,55 +1,60 @@
+//! One batcher task per shard: accumulates operations and flushes them when the
+//! batch fills up or the linger timer fires.
+
 use crate::batch::{Batch, ReadBatch, WriteBatch};
 use crate::errors::OxiaError;
 use crate::operations::Operation;
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
 use crate::write_stream_manager::WriteStreamManager;
-use log::info;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 #[derive(Clone)]
-pub enum Batcher {
+pub(crate) enum Batcher {
     Read,
     Write,
 }
 
 impl Batcher {
-    fn create_batch(
-        &self,
-        shard_id: i64,
-        shard_manager: Arc<ShardManager>,
-        provider_manager: Arc<ProviderManager>,
-        write_stream_manager: Arc<WriteStreamManager>,
-        max_requests_per_batch: u32,
-        request_timeout: Duration,
-    ) -> Batch {
+    fn create_batch(&self, ctx: &BatcherContext) -> Batch {
         match self {
             Batcher::Read => Batch::Read(ReadBatch::new(
-                shard_id,
-                shard_manager,
-                provider_manager,
-                max_requests_per_batch,
-                request_timeout,
+                ctx.shard_id,
+                ctx.shard_manager.clone(),
+                ctx.provider_manager.clone(),
+                ctx.max_requests_per_batch,
+                ctx.request_timeout,
             )),
             Batcher::Write => Batch::Write(WriteBatch::new(
-                shard_id,
-                write_stream_manager,
-                max_requests_per_batch,
+                ctx.shard_id,
+                ctx.write_stream_manager.clone(),
+                ctx.max_requests_per_batch,
             )),
         }
     }
 }
 
-pub struct BatchManager {
+pub(crate) struct BatcherContext {
+    pub(crate) shard_id: i64,
+    pub(crate) shard_manager: Arc<ShardManager>,
+    pub(crate) provider_manager: Arc<ProviderManager>,
+    pub(crate) write_stream_manager: Arc<WriteStreamManager>,
+    pub(crate) batch_linger: Duration,
+    pub(crate) max_requests_per_batch: u32,
+    pub(crate) request_timeout: Duration,
+}
+
+pub(crate) struct BatchManager {
     context: CancellationToken,
     tx: UnboundedSender<Operation>,
-    batch_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    batch_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Drop for BatchManager {
@@ -59,48 +64,32 @@ impl Drop for BatchManager {
 }
 
 impl BatchManager {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        shard_id: i64,
-        batcher: Batcher,
-        shard_manager: Arc<ShardManager>,
-        provider_manager: Arc<ProviderManager>,
-        write_stream_manager: Arc<WriteStreamManager>,
-        batch_linger: Duration,
-        _batch_max_size: u32,
-        max_requests_per_batch: u32,
-        request_timeout: Duration,
-    ) -> Self {
+    pub(crate) fn new(batcher: Batcher, ctx: BatcherContext) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let context = CancellationToken::new();
-        let handle = tokio::spawn(start_batcher(
-            context.clone(),
-            rx,
-            shard_id,
-            batcher,
-            shard_manager,
-            provider_manager,
-            write_stream_manager,
-            batch_linger,
-            max_requests_per_batch,
-            request_timeout,
-        ));
+        let handle = tokio::spawn(start_batcher(context.clone(), rx, batcher, ctx));
         BatchManager {
             context,
             tx,
-            batch_handle: Arc::new(Mutex::new(Some(handle))),
+            batch_handle: Mutex::new(Some(handle)),
         }
     }
 
-    pub fn add(&self, operation: Operation) -> Result<(), OxiaError> {
+    pub(crate) fn add(&self, operation: Operation) -> Result<(), OxiaError> {
         // The batcher's receiver is only dropped when the batcher has been shut
-        // down, so a send failure means the client (or this shard's batcher) is
-        // gone.
+        // down, so a send failure means the client is closed.
         self.tx.send(operation).map_err(|_| OxiaError::Closed)?;
         Ok(())
     }
 
-    pub async fn shutdown(self) -> Result<(), OxiaError> {
+    /// Gracefully stops the batcher: everything already enqueued is flushed
+    /// before the task exits.
+    pub(crate) async fn close(&self) -> Result<(), OxiaError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self.tx.send(Operation::Flush(ack_tx)).is_ok() {
+            // Wait for the batcher to drain everything queued before the marker.
+            let _ = ack_rx.await;
+        }
         self.context.cancel();
         let mut handle_guard = self.batch_handle.lock().await;
         if let Some(handle) = handle_guard.take() {
@@ -112,33 +101,19 @@ impl BatchManager {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn start_batcher(
     context: CancellationToken,
     mut rx: UnboundedReceiver<Operation>,
-    shard_id: i64,
     batcher: Batcher,
-    shard_manager: Arc<ShardManager>,
-    provider_manager: Arc<ProviderManager>,
-    write_stream_manager: Arc<WriteStreamManager>,
-    batch_linger: Duration,
-    max_requests_per_batch: u32,
-    request_timeout: Duration,
+    ctx: BatcherContext,
 ) {
     let mut buffer = Vec::new();
-    let mut batch = batcher.create_batch(
-        shard_id,
-        shard_manager.clone(),
-        provider_manager.clone(),
-        write_stream_manager.clone(),
-        max_requests_per_batch,
-        request_timeout,
-    );
-    let mut interval = interval(batch_linger);
+    let mut batch = batcher.create_batch(&ctx);
+    let mut interval = interval(ctx.batch_linger);
     loop {
         tokio::select! {
              _ = context.cancelled() => {
-                info!("Exit batcher due to context canceled.");
+                debug!(shard = ctx.shard_id, "batcher stopped: cancelled");
                 return
             },
             _ = interval.tick() => {
@@ -146,17 +121,29 @@ async fn start_batcher(
                    continue
                 }
                 batch.flush().await;
-                batch = batcher.create_batch( shard_id, shard_manager.clone(), provider_manager.clone(), write_stream_manager.clone(), max_requests_per_batch, request_timeout);
+                batch = batcher.create_batch(&ctx);
             }
             size = rx.recv_many(&mut buffer, usize::MAX) => {
                 if size == 0 {
-                    info!("Exit batcher due to channel closed.");
+                    // Channel closed: flush what we have, then exit.
+                    if !batch.is_empty() {
+                        batch.flush().await;
+                    }
+                    debug!(shard = ctx.shard_id, "batcher stopped: channel closed");
                     return
                 }
-                for operation  in buffer.drain(..) {
+                for operation in buffer.drain(..) {
+                    if let Operation::Flush(ack) = operation {
+                        if !batch.is_empty() {
+                            batch.flush().await;
+                            batch = batcher.create_batch(&ctx);
+                        }
+                        let _ = ack.send(());
+                        continue;
+                    }
                     if !batch.can_add(&operation) {
                         batch.flush().await;
-                        batch = batcher.create_batch( shard_id, shard_manager.clone(), provider_manager.clone(), write_stream_manager.clone(), max_requests_per_batch, request_timeout);
+                        batch = batcher.create_batch(&ctx);
                         interval.reset();
                     }
                     batch.add(operation);

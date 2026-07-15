@@ -5,8 +5,8 @@
 //! other Oxia client SDK exactly, otherwise a key written by one client is
 //! looked up on the wrong shard by another.
 
-use crate::oxia::ShardKeyRouter;
-use log::warn;
+use crate::proto::ShardKeyRouter;
+use tracing::warn;
 
 /// Hashes `key` with the algorithm Oxia uses for shard routing: the low 32
 /// bits of the 64-bit XXH3 digest (seed 0).

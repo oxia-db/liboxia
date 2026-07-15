@@ -9,10 +9,10 @@
 //! promptly instead of waiting out a maxed-out backoff.
 
 use crate::errors::OxiaError;
-use log::warn;
 use std::future::Future;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 const INITIAL_DELAY: Duration = Duration::from_millis(100);
 const MAX_DELAY: Duration = Duration::from_secs(30);

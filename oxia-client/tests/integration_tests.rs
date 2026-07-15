@@ -1,10 +1,4 @@
-use oxia::client::{
-    DeleteOption, DeleteRangeOption, GetOption, KeyCreated, KeyDeleted, KeyModified, ListOption,
-    Notification, PutOption, RangeScanOption,
-};
-use oxia::client_builder::OxiaClientBuilder;
-use oxia::errors::OxiaError;
-use oxia::oxia::{KeyComparisonType, SecondaryIndex};
+use oxia::{ComparisonType, Notification, OxiaClient, OxiaClientBuilder, OxiaError};
 use std::time::Duration;
 use testcontainers::core::ports::ContainerPort;
 use testcontainers::core::wait::WaitFor;
@@ -36,7 +30,7 @@ async fn start_oxia() -> (ContainerAsync<GenericImage>, String) {
     (container, address)
 }
 
-async fn new_client(address: &str) -> oxia::client::OxiaClient {
+async fn new_client(address: &str) -> OxiaClient {
     OxiaClientBuilder::new()
         .service_address(address.to_string())
         .request_timeout(Duration::from_secs(10))
@@ -64,10 +58,13 @@ async fn test_put_and_get() {
 
     let get_result = client.get("test/key1".to_string()).await.unwrap();
     assert_eq!(get_result.key, "test/key1");
-    assert_eq!(get_result.value, Some(b"hello world".to_vec()));
+    assert_eq!(
+        get_result.value.as_deref(),
+        Some(b"hello world".to_vec()).as_deref()
+    );
     assert_eq!(get_result.version.version_id, put_result.version.version_id);
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -87,9 +84,9 @@ async fn test_put_overwrite() {
     assert!(r2.version.version_id > r1.version.version_id);
 
     let get = client.get("test/overwrite".to_string()).await.unwrap();
-    assert_eq!(get.value, Some(b"v2".to_vec()));
+    assert_eq!(get.value.as_deref(), Some(b"v2".to_vec()).as_deref());
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -106,7 +103,7 @@ async fn test_delete() {
     let result = client.get("test/del".to_string()).await;
     assert!(matches!(result, Err(OxiaError::KeyNotFound)));
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -117,7 +114,7 @@ async fn test_get_nonexistent() {
     let result = client.get("nonexistent/key".to_string()).await;
     assert!(matches!(result, Err(OxiaError::KeyNotFound)));
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -136,7 +133,7 @@ async fn test_delete_range() {
         .list("range/".to_string(), "range/~".to_string())
         .await
         .unwrap();
-    assert_eq!(list_before.keys.len(), 5);
+    assert_eq!(list_before.len(), 5);
 
     client
         .delete_range("range/".to_string(), "range/~".to_string())
@@ -147,9 +144,9 @@ async fn test_delete_range() {
         .list("range/".to_string(), "range/~".to_string())
         .await
         .unwrap();
-    assert_eq!(list_after.keys.len(), 0);
+    assert_eq!(list_after.len(), 0);
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -170,17 +167,17 @@ async fn test_list() {
         .await
         .unwrap();
 
-    assert_eq!(result.keys.len(), 3);
-    assert!(result.keys.contains(&"list/a".to_string()));
-    assert!(result.keys.contains(&"list/b".to_string()));
-    assert!(result.keys.contains(&"list/c".to_string()));
+    assert_eq!(result.len(), 3);
+    assert!(result.contains(&"list/a".to_string()));
+    assert!(result.contains(&"list/b".to_string()));
+    assert!(result.contains(&"list/c".to_string()));
 
     // Cleanup
     client
         .delete_range("list/".to_string(), "list/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -200,8 +197,8 @@ async fn test_range_scan() {
         .await
         .unwrap();
 
-    assert_eq!(result.records.len(), 3);
-    for record in &result.records {
+    assert_eq!(result.len(), 3);
+    for record in &result {
         assert!(record.value.is_some());
         assert!(record.key.starts_with("scan/"));
     }
@@ -211,7 +208,7 @@ async fn test_range_scan() {
         .delete_range("scan/".to_string(), "scan/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -223,9 +220,9 @@ async fn test_list_empty_range() {
         .list("empty/".to_string(), "empty/~".to_string())
         .await
         .unwrap();
-    assert_eq!(result.keys.len(), 0);
+    assert_eq!(result.len(), 0);
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -244,22 +241,16 @@ async fn test_expected_version_id() {
 
     // Update with correct version should succeed
     let r2 = client
-        .put_with_options(
-            "ver/key".to_string(),
-            b"v2".to_vec(),
-            vec![PutOption::ExpectVersionId(r1.version.version_id)],
-        )
+        .put("ver/key".to_string(), b"v2".to_vec())
+        .expected_version_id(r1.version.version_id)
         .await
         .unwrap();
     assert!(r2.version.version_id > r1.version.version_id);
 
     // Update with stale version should fail
     let err = client
-        .put_with_options(
-            "ver/key".to_string(),
-            b"v3".to_vec(),
-            vec![PutOption::ExpectVersionId(r1.version.version_id)],
-        )
+        .put("ver/key".to_string(), b"v3".to_vec())
+        .expected_version_id(r1.version.version_id)
         .await;
     assert!(matches!(err, Err(OxiaError::UnexpectedVersionId)));
 
@@ -267,7 +258,7 @@ async fn test_expected_version_id() {
         .delete_range("ver/".to_string(), "ver/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -277,21 +268,15 @@ async fn test_expected_record_not_exists() {
 
     // First put should succeed
     client
-        .put_with_options(
-            "new/key".to_string(),
-            b"v1".to_vec(),
-            vec![PutOption::ExpectedRecordNotExists()],
-        )
+        .put("new/key".to_string(), b"v1".to_vec())
+        .expected_record_not_exists()
         .await
         .unwrap();
 
     // Second put should fail - record already exists
     let err = client
-        .put_with_options(
-            "new/key".to_string(),
-            b"v2".to_vec(),
-            vec![PutOption::ExpectedRecordNotExists()],
-        )
+        .put("new/key".to_string(), b"v2".to_vec())
+        .expected_record_not_exists()
         .await;
     assert!(matches!(err, Err(OxiaError::UnexpectedVersionId)));
 
@@ -299,7 +284,7 @@ async fn test_expected_record_not_exists() {
         .delete_range("new/".to_string(), "new/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -314,26 +299,22 @@ async fn test_delete_with_expected_version() {
 
     // Delete with wrong version should fail
     let err = client
-        .delete_with_options(
-            "delver/key".to_string(),
-            vec![DeleteOption::ExpectVersionId(999)],
-        )
+        .delete("delver/key".to_string())
+        .expected_version_id(999)
         .await;
     assert!(matches!(err, Err(OxiaError::UnexpectedVersionId)));
 
     // Delete with correct version should succeed
     client
-        .delete_with_options(
-            "delver/key".to_string(),
-            vec![DeleteOption::ExpectVersionId(put_result.version.version_id)],
-        )
+        .delete("delver/key".to_string())
+        .expected_version_id(put_result.version.version_id)
         .await
         .unwrap();
 
     let get = client.get("delver/key".to_string()).await;
     assert!(matches!(get, Err(OxiaError::KeyNotFound)));
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -351,10 +332,8 @@ async fn test_get_floor() {
 
     // Floor of "cmp/d" should be "cmp/c" (highest key <= "cmp/d")
     let result = client
-        .get_with_options(
-            "cmp/d".to_string(),
-            vec![GetOption::ComparisonType(KeyComparisonType::Floor)],
-        )
+        .get("cmp/d".to_string())
+        .comparison(ComparisonType::Floor)
         .await
         .unwrap();
     assert_eq!(result.key, "cmp/c");
@@ -363,7 +342,7 @@ async fn test_get_floor() {
         .delete_range("cmp/".to_string(), "cmp/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -377,10 +356,8 @@ async fn test_get_ceiling() {
 
     // Ceiling of "cmp2/b" should be "cmp2/c" (lowest key >= "cmp2/b")
     let result = client
-        .get_with_options(
-            "cmp2/b".to_string(),
-            vec![GetOption::ComparisonType(KeyComparisonType::Ceiling)],
-        )
+        .get("cmp2/b".to_string())
+        .comparison(ComparisonType::Ceiling)
         .await
         .unwrap();
     assert_eq!(result.key, "cmp2/c");
@@ -389,7 +366,7 @@ async fn test_get_ceiling() {
         .delete_range("cmp2/".to_string(), "cmp2/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -403,10 +380,8 @@ async fn test_get_lower() {
 
     // Lower of "cmp3/c" should be "cmp3/a" (highest key < "cmp3/c")
     let result = client
-        .get_with_options(
-            "cmp3/c".to_string(),
-            vec![GetOption::ComparisonType(KeyComparisonType::Lower)],
-        )
+        .get("cmp3/c".to_string())
+        .comparison(ComparisonType::Lower)
         .await
         .unwrap();
     assert_eq!(result.key, "cmp3/a");
@@ -415,7 +390,7 @@ async fn test_get_lower() {
         .delete_range("cmp3/".to_string(), "cmp3/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -429,10 +404,8 @@ async fn test_get_higher() {
 
     // Higher of "cmp4/c" should be "cmp4/e" (lowest key > "cmp4/c")
     let result = client
-        .get_with_options(
-            "cmp4/c".to_string(),
-            vec![GetOption::ComparisonType(KeyComparisonType::Higher)],
-        )
+        .get("cmp4/c".to_string())
+        .comparison(ComparisonType::Higher)
         .await
         .unwrap();
     assert_eq!(result.key, "cmp4/e");
@@ -441,7 +414,7 @@ async fn test_get_higher() {
         .delete_range("cmp4/".to_string(), "cmp4/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -455,20 +428,20 @@ async fn test_ephemeral_keys() {
     // Create client and put ephemeral key
     let client1 = new_client(&address).await;
     client1
-        .put_with_options(
-            "eph/key1".to_string(),
-            b"ephemeral-value".to_vec(),
-            vec![PutOption::Ephemeral()],
-        )
+        .put("eph/key1".to_string(), b"ephemeral-value".to_vec())
+        .ephemeral()
         .await
         .unwrap();
 
     // Verify it exists
     let get_result = client1.get("eph/key1".to_string()).await.unwrap();
-    assert_eq!(get_result.value, Some(b"ephemeral-value".to_vec()));
+    assert_eq!(
+        get_result.value.as_deref(),
+        Some(b"ephemeral-value".to_vec()).as_deref()
+    );
 
     // Shutdown client (which closes session, deleting ephemeral keys)
-    client1.shutdown().await.unwrap();
+    client1.close().await.unwrap();
 
     // Wait for session to be cleaned up (retry with backoff)
     let client2 = new_client(&address).await;
@@ -486,7 +459,7 @@ async fn test_ephemeral_keys() {
         "Expected ephemeral key to be deleted after client shutdown"
     );
 
-    client2.shutdown().await.unwrap();
+    client2.close().await.unwrap();
 }
 
 // ============================================================
@@ -516,14 +489,14 @@ async fn test_multiple_puts_batch() {
         .list("batch/".to_string(), "batch/~".to_string())
         .await
         .unwrap();
-    assert_eq!(list.keys.len(), 20);
+    assert_eq!(list.len(), 20);
 
     // Cleanup
     client
         .delete_range("batch/".to_string(), "batch/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -535,7 +508,7 @@ async fn test_notifications() {
     let (_container, address) = start_oxia().await;
     let client = new_client(&address).await;
 
-    let mut notification_rx = client.get_notifications().await.unwrap();
+    let mut notification_rx = client.notifications().await.unwrap();
 
     // Give notification listener time to connect
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -581,22 +554,22 @@ async fn test_notifications() {
     // First notification should be KeyCreated
     assert!(matches!(
         &notifications[0],
-        Notification::KeyCreated(KeyCreated { key, .. }) if key == "notif/key1"
+        Notification::KeyCreated { key, .. } if key == "notif/key1"
     ));
 
     // Second should be KeyModified
     assert!(matches!(
         &notifications[1],
-        Notification::KeyModified(KeyModified { key, .. }) if key == "notif/key1"
+        Notification::KeyModified { key, .. } if key == "notif/key1"
     ));
 
     // Third should be KeyDeleted
     assert!(matches!(
         &notifications[2],
-        Notification::KeyDeleted(KeyDeleted { key }) if key == "notif/key1"
+        Notification::KeyDeleted { key } if key == "notif/key1"
     ));
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -610,46 +583,36 @@ async fn test_partition_key() {
 
     // Put with partition key
     let result = client
-        .put_with_options(
-            "pk/key1".to_string(),
-            b"value1".to_vec(),
-            vec![PutOption::PartitionKey("my-partition".to_string())],
-        )
+        .put("pk/key1".to_string(), b"value1".to_vec())
+        .partition_key("my-partition".to_string())
         .await
         .unwrap();
     assert_eq!(result.key, "pk/key1");
 
     // Get with partition key
     let get = client
-        .get_with_options(
-            "pk/key1".to_string(),
-            vec![GetOption::PartitionKey("my-partition".to_string())],
-        )
+        .get("pk/key1".to_string())
+        .partition_key("my-partition".to_string())
         .await
         .unwrap();
-    assert_eq!(get.value, Some(b"value1".to_vec()));
+    assert_eq!(get.value.as_deref(), Some(b"value1".to_vec()).as_deref());
 
     // List with partition key
     let list = client
-        .list_with_options(
-            "pk/".to_string(),
-            "pk/~".to_string(),
-            vec![ListOption::PartitionKey("my-partition".to_string())],
-        )
+        .list("pk/".to_string(), "pk/~".to_string())
+        .partition_key("my-partition".to_string())
         .await
         .unwrap();
-    assert!(list.keys.contains(&"pk/key1".to_string()));
+    assert!(list.contains(&"pk/key1".to_string()));
 
     // Delete with partition key
     client
-        .delete_with_options(
-            "pk/key1".to_string(),
-            vec![DeleteOption::PartitionKey("my-partition".to_string())],
-        )
+        .delete("pk/key1".to_string())
+        .partition_key("my-partition".to_string())
         .await
         .unwrap();
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -665,26 +628,16 @@ async fn test_sequence_keys() {
 
     // Put records with sequence key deltas
     let r1 = client
-        .put_with_options(
-            "seq/events".to_string(),
-            b"event-1".to_vec(),
-            vec![
-                PutOption::PartitionKey(partition_key.clone()),
-                PutOption::SequenceKeyDelta(vec![1]),
-            ],
-        )
+        .put("seq/events".to_string(), b"event-1".to_vec())
+        .partition_key(partition_key.clone())
+        .sequence_key_deltas(vec![1])
         .await
         .unwrap();
 
     let r2 = client
-        .put_with_options(
-            "seq/events".to_string(),
-            b"event-2".to_vec(),
-            vec![
-                PutOption::PartitionKey(partition_key.clone()),
-                PutOption::SequenceKeyDelta(vec![1]),
-            ],
-        )
+        .put("seq/events".to_string(), b"event-2".to_vec())
+        .partition_key(partition_key.clone())
+        .sequence_key_deltas(vec![1])
         .await
         .unwrap();
 
@@ -693,15 +646,12 @@ async fn test_sequence_keys() {
 
     // Cleanup
     client
-        .delete_range_with_options(
-            "seq/".to_string(),
-            "seq/~".to_string(),
-            vec![DeleteRangeOption::PartitionKey(partition_key)],
-        )
+        .delete_range("seq/".to_string(), "seq/~".to_string())
+        .partition_key(partition_key)
         .await
         .unwrap();
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -715,59 +665,41 @@ async fn test_secondary_index() {
 
     // Put records with secondary indexes
     client
-        .put_with_options(
-            "idx/user1".to_string(),
-            b"alice".to_vec(),
-            vec![PutOption::SecondaryIndexes(vec![SecondaryIndex {
-                index_name: "by-name".to_string(),
-                secondary_key: "alice".to_string(),
-            }])],
-        )
+        .put("idx/user1".to_string(), b"alice".to_vec())
+        .secondary_index("by-name".to_string(), "alice".to_string())
         .await
         .unwrap();
 
     client
-        .put_with_options(
-            "idx/user2".to_string(),
-            b"bob".to_vec(),
-            vec![PutOption::SecondaryIndexes(vec![SecondaryIndex {
-                index_name: "by-name".to_string(),
-                secondary_key: "bob".to_string(),
-            }])],
-        )
+        .put("idx/user2".to_string(), b"bob".to_vec())
+        .secondary_index("by-name".to_string(), "bob".to_string())
         .await
         .unwrap();
 
     // List using secondary index
     let list = client
-        .list_with_options(
-            "a".to_string(),
-            "z".to_string(),
-            vec![ListOption::UseIndex("by-name".to_string())],
-        )
+        .list("a".to_string(), "z".to_string())
+        .use_index("by-name".to_string())
         .await
         .unwrap();
 
     assert!(
-        list.keys.len() >= 2,
+        list.len() >= 2,
         "Expected at least 2 keys via secondary index, got {}",
-        list.keys.len()
+        list.len()
     );
 
     // Range scan using secondary index
     let scan = client
-        .range_scan_with_options(
-            "a".to_string(),
-            "z".to_string(),
-            vec![RangeScanOption::UseIndex("by-name".to_string())],
-        )
+        .range_scan("a".to_string(), "z".to_string())
+        .use_index("by-name".to_string())
         .await
         .unwrap();
 
     assert!(
-        scan.records.len() >= 2,
+        scan.len() >= 2,
         "Expected at least 2 records via secondary index range scan, got {}",
-        scan.records.len()
+        scan.len()
     );
 
     // Cleanup
@@ -775,7 +707,7 @@ async fn test_secondary_index() {
         .delete_range("idx/".to_string(), "idx/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -804,13 +736,13 @@ async fn test_client_builder_options() {
         .await
         .unwrap();
     let result = client.get("builder/test".to_string()).await.unwrap();
-    assert_eq!(result.value, Some(b"value".to_vec()));
+    assert_eq!(result.value.as_deref(), Some(b"value".to_vec()).as_deref());
 
     client
         .delete_range("builder/".to_string(), "builder/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -831,7 +763,10 @@ async fn test_client_clone_concurrent() {
                 .await
                 .unwrap();
             let get = c.get(format!("clone/{}", i)).await.unwrap();
-            assert_eq!(get.value, Some(format!("value-{}", i).into_bytes()));
+            assert_eq!(
+                get.value.as_deref(),
+                Some(format!("value-{}", i).into_bytes()).as_deref()
+            );
         }));
     }
 
@@ -843,13 +778,13 @@ async fn test_client_clone_concurrent() {
         .list("clone/".to_string(), "clone/~".to_string())
         .await
         .unwrap();
-    assert_eq!(list.keys.len(), 10);
+    assert_eq!(list.len(), 10);
 
     client
         .delete_range("clone/".to_string(), "clone/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -884,7 +819,7 @@ async fn test_version_metadata() {
         .delete_range("meta/".to_string(), "meta/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -903,26 +838,27 @@ async fn test_get_without_value() {
 
     // Get without value
     let result = client
-        .get_with_options(
-            "noval/key".to_string(),
-            vec![GetOption::IncludeValue(false)],
-        )
+        .get("noval/key".to_string())
+        .include_value(false)
         .await
         .unwrap();
 
     assert_eq!(result.key, "noval/key");
-    assert_eq!(result.value, None);
+    assert_eq!(result.value.as_deref(), None::<&[u8]>);
     assert!(result.version.version_id >= 0);
 
     // Get with value (default)
     let result = client.get("noval/key".to_string()).await.unwrap();
-    assert_eq!(result.value, Some(b"some-value".to_vec()));
+    assert_eq!(
+        result.value.as_deref(),
+        Some(b"some-value".to_vec()).as_deref()
+    );
 
     client
         .delete_range("noval/".to_string(), "noval/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -943,13 +879,13 @@ async fn test_large_value() {
         .unwrap();
 
     let result = client.get("large/key".to_string()).await.unwrap();
-    assert_eq!(result.value, Some(large_value));
+    assert_eq!(result.value.as_deref(), Some(large_value).as_deref());
 
     client
         .delete_range("large/".to_string(), "large/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -966,7 +902,7 @@ async fn test_delete_nonexistent_key() {
     // Oxia returns KeyNotFound when deleting non-existent keys
     assert!(result.is_ok() || matches!(result, Err(OxiaError::KeyNotFound)));
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -986,29 +922,24 @@ async fn test_sequential_operations() {
 
     // Read
     let get1 = client.get("seq-ops/key".to_string()).await.unwrap();
-    assert_eq!(get1.value, Some(b"v1".to_vec()));
+    assert_eq!(get1.value.as_deref(), Some(b"v1".to_vec()).as_deref());
 
     // Update with version check (CAS)
     let r2 = client
-        .put_with_options(
-            "seq-ops/key".to_string(),
-            b"v2".to_vec(),
-            vec![PutOption::ExpectVersionId(r1.version.version_id)],
-        )
+        .put("seq-ops/key".to_string(), b"v2".to_vec())
+        .expected_version_id(r1.version.version_id)
         .await
         .unwrap();
 
     // Read updated
     let get2 = client.get("seq-ops/key".to_string()).await.unwrap();
-    assert_eq!(get2.value, Some(b"v2".to_vec()));
+    assert_eq!(get2.value.as_deref(), Some(b"v2".to_vec()).as_deref());
     assert_eq!(get2.version.version_id, r2.version.version_id);
 
     // Delete with version check
     client
-        .delete_with_options(
-            "seq-ops/key".to_string(),
-            vec![DeleteOption::ExpectVersionId(r2.version.version_id)],
-        )
+        .delete("seq-ops/key".to_string())
+        .expected_version_id(r2.version.version_id)
         .await
         .unwrap();
 
@@ -1016,7 +947,7 @@ async fn test_sequential_operations() {
     let get3 = client.get("seq-ops/key".to_string()).await;
     assert!(matches!(get3, Err(OxiaError::KeyNotFound)));
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1041,18 +972,21 @@ async fn test_range_scan_values() {
         .await
         .unwrap();
 
-    assert_eq!(result.records.len(), 3);
+    assert_eq!(result.len(), 3);
     // Records should be sorted
     for (i, (key, val)) in pairs.iter().enumerate() {
-        assert_eq!(result.records[i].key, *key);
-        assert_eq!(result.records[i].value, Some(val.as_bytes().to_vec()));
+        assert_eq!(result[i].key, *key);
+        assert_eq!(
+            result[i].value.as_deref(),
+            Some(val.as_bytes().to_vec()).as_deref()
+        );
     }
 
     client
         .delete_range("rsv/".to_string(), "rsv/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1072,7 +1006,7 @@ async fn test_empty_value() {
     let result = client.get("empty-val/key".to_string()).await.unwrap();
     // Empty bytes may be represented as None or Some([]) depending on protobuf encoding
     assert!(
-        result.value.is_none() || result.value == Some(b"".to_vec()),
+        result.value.is_none() || result.value.as_deref() == Some(b"".as_ref()),
         "Expected None or Some([]) for empty value, got: {:?}",
         result.value
     );
@@ -1081,7 +1015,7 @@ async fn test_empty_value() {
         .delete_range("empty-val/".to_string(), "empty-val/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1111,13 +1045,13 @@ async fn test_special_chars_in_keys() {
         .list("special/".to_string(), "special/~".to_string())
         .await
         .unwrap();
-    assert_eq!(list.keys.len(), special_keys.len());
+    assert_eq!(list.len(), special_keys.len());
 
     client
         .delete_range("special/".to_string(), "special/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1129,10 +1063,7 @@ async fn test_notifications_with_buffer_size() {
     let (_container, address) = start_oxia().await;
     let client = new_client(&address).await;
 
-    let mut notification_rx = client
-        .get_notifications_with_options(vec![oxia::client::GetNotificationOption::BufferSize(10)])
-        .await
-        .unwrap();
+    let mut notification_rx = client.notifications().buffer_size(10).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -1147,13 +1078,13 @@ async fn test_notifications_with_buffer_size() {
         .unwrap()
         .unwrap();
 
-    assert!(matches!(notification, Notification::KeyCreated(_)));
+    assert!(matches!(notification, Notification::KeyCreated { .. }));
 
     client
         .delete_range("notif2/".to_string(), "notif2/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1202,14 +1133,17 @@ async fn test_concurrent_read_write() {
     // Verify final state
     for i in 0..10 {
         let result = client.get(format!("crw/{}", i)).await.unwrap();
-        assert_eq!(result.value, Some(format!("updated-{}", i).into_bytes()));
+        assert_eq!(
+            result.value.as_deref(),
+            Some(format!("updated-{}", i).into_bytes()).as_deref()
+        );
     }
 
     client
         .delete_range("crw/".to_string(), "crw/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1225,37 +1159,28 @@ async fn test_delete_range_with_partition_key() {
 
     for i in 0..3 {
         client
-            .put_with_options(
-                format!("drpk/{}", i),
-                format!("val-{}", i).into_bytes(),
-                vec![PutOption::PartitionKey(pk.clone())],
-            )
+            .put(format!("drpk/{}", i), format!("val-{}", i).into_bytes())
+            .partition_key(pk.clone())
             .await
             .unwrap();
     }
 
     // Delete range with partition key
     client
-        .delete_range_with_options(
-            "drpk/".to_string(),
-            "drpk/~".to_string(),
-            vec![DeleteRangeOption::PartitionKey(pk.clone())],
-        )
+        .delete_range("drpk/".to_string(), "drpk/~".to_string())
+        .partition_key(pk.clone())
         .await
         .unwrap();
 
     // Verify keys are deleted
     let list = client
-        .list_with_options(
-            "drpk/".to_string(),
-            "drpk/~".to_string(),
-            vec![ListOption::PartitionKey(pk)],
-        )
+        .list("drpk/".to_string(), "drpk/~".to_string())
+        .partition_key(pk)
         .await
         .unwrap();
-    assert_eq!(list.keys.len(), 0);
+    assert_eq!(list.len(), 0);
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1271,35 +1196,26 @@ async fn test_range_scan_with_partition_key() {
 
     for i in 0..3 {
         client
-            .put_with_options(
-                format!("rspk/{}", i),
-                format!("val-{}", i).into_bytes(),
-                vec![PutOption::PartitionKey(pk.clone())],
-            )
+            .put(format!("rspk/{}", i), format!("val-{}", i).into_bytes())
+            .partition_key(pk.clone())
             .await
             .unwrap();
     }
 
     let result = client
-        .range_scan_with_options(
-            "rspk/".to_string(),
-            "rspk/~".to_string(),
-            vec![RangeScanOption::PartitionKey(pk.clone())],
-        )
+        .range_scan("rspk/".to_string(), "rspk/~".to_string())
+        .partition_key(pk.clone())
         .await
         .unwrap();
 
-    assert_eq!(result.records.len(), 3);
+    assert_eq!(result.len(), 3);
 
     client
-        .delete_range_with_options(
-            "rspk/".to_string(),
-            "rspk/~".to_string(),
-            vec![DeleteRangeOption::PartitionKey(pk)],
-        )
+        .delete_range("rspk/".to_string(), "rspk/~".to_string())
+        .partition_key(pk)
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1339,14 +1255,14 @@ async fn test_high_throughput_writes() {
         .list("stress/".to_string(), "stress/~".to_string())
         .await
         .unwrap();
-    assert_eq!(list.keys.len(), num_ops);
+    assert_eq!(list.len(), num_ops);
 
     // Range scan all
     let scan = client
         .range_scan("stress/".to_string(), "stress/~".to_string())
         .await
         .unwrap();
-    assert_eq!(scan.records.len(), num_ops);
+    assert_eq!(scan.len(), num_ops);
 
     // Flood with concurrent delete operations
     let mut del_handles = Vec::new();
@@ -1365,9 +1281,9 @@ async fn test_high_throughput_writes() {
         .list("stress/".to_string(), "stress/~".to_string())
         .await
         .unwrap();
-    assert_eq!(list.keys.len(), 0);
+    assert_eq!(list.len(), 0);
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1376,26 +1292,30 @@ async fn test_high_throughput_writes() {
 
 #[tokio::test]
 async fn test_notification_display() {
-    let created = Notification::KeyCreated(KeyCreated {
+    let created = Notification::KeyCreated {
         key: "test/key".to_string(),
         version_id: Some(42),
-    });
+    };
     assert!(format!("{}", created).contains("test/key"));
     assert!(format!("{}", created).contains("42"));
 
-    let deleted = Notification::KeyDeleted(KeyDeleted {
+    let deleted = Notification::KeyDeleted {
         key: "test/key".to_string(),
-    });
+    };
     assert!(format!("{}", deleted).contains("test/key"));
 
-    let modified = Notification::KeyModified(KeyModified {
+    let modified = Notification::KeyModified {
         key: "test/key".to_string(),
         version_id: Some(43),
-    });
+    };
     assert!(format!("{}", modified).contains("test/key"));
 
-    let unknown = Notification::Unknown();
-    assert_eq!(format!("{}", unknown), "Unknown");
+    let range_deleted = Notification::KeyRangeDeleted {
+        key: "test/a".to_string(),
+        key_range_last: Some("test/z".to_string()),
+    };
+    assert!(format!("{}", range_deleted).contains("test/a"));
+    assert_eq!(range_deleted.key(), "test/a");
 }
 
 // ============================================================
@@ -1409,56 +1329,33 @@ async fn test_multiple_secondary_indexes() {
 
     // Put a record with multiple secondary indexes
     client
-        .put_with_options(
-            "multi-idx/record1".to_string(),
-            b"some-data".to_vec(),
-            vec![PutOption::SecondaryIndexes(vec![
-                SecondaryIndex {
-                    index_name: "by-type".to_string(),
-                    secondary_key: "document".to_string(),
-                },
-                SecondaryIndex {
-                    index_name: "by-status".to_string(),
-                    secondary_key: "active".to_string(),
-                },
-            ])],
-        )
+        .put("multi-idx/record1".to_string(), b"some-data".to_vec())
+        .secondary_index("by-type".to_string(), "document".to_string())
+        .secondary_index("by-status".to_string(), "active".to_string())
         .await
         .unwrap();
 
     // Query via first secondary index
     let list1 = client
-        .list_with_options(
-            "d".to_string(),
-            "e".to_string(),
-            vec![ListOption::UseIndex("by-type".to_string())],
-        )
+        .list("d".to_string(), "e".to_string())
+        .use_index("by-type".to_string())
         .await
         .unwrap();
-    assert!(
-        !list1.keys.is_empty(),
-        "Should find record via by-type index"
-    );
+    assert!(!list1.is_empty(), "Should find record via by-type index");
 
     // Query via second secondary index
     let list2 = client
-        .list_with_options(
-            "a".to_string(),
-            "b".to_string(),
-            vec![ListOption::UseIndex("by-status".to_string())],
-        )
+        .list("a".to_string(), "b".to_string())
+        .use_index("by-status".to_string())
         .await
         .unwrap();
-    assert!(
-        !list2.keys.is_empty(),
-        "Should find record via by-status index"
-    );
+    assert!(!list2.is_empty(), "Should find record via by-status index");
 
     client
         .delete_range("multi-idx/".to_string(), "multi-idx/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1479,15 +1376,15 @@ async fn test_list_partial_range() {
         .list("pr/b".to_string(), "pr/d".to_string())
         .await
         .unwrap();
-    assert_eq!(result.keys.len(), 2);
-    assert!(result.keys.contains(&"pr/b".to_string()));
-    assert!(result.keys.contains(&"pr/c".to_string()));
+    assert_eq!(result.len(), 2);
+    assert!(result.contains(&"pr/b".to_string()));
+    assert!(result.contains(&"pr/c".to_string()));
 
     client
         .delete_range("pr/".to_string(), "pr/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1507,14 +1404,14 @@ async fn test_read_your_writes() {
             .await
             .unwrap();
         let result = client.get(key).await.unwrap();
-        assert_eq!(result.value, Some(value.into_bytes()));
+        assert_eq!(result.value.as_deref(), Some(value.into_bytes()).as_deref());
     }
 
     client
         .delete_range("ryw/".to_string(), "ryw/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1535,7 +1432,10 @@ async fn test_multiple_clients() {
 
     // Client 2 reads
     let result = client2.get("mc/key1".to_string()).await.unwrap();
-    assert_eq!(result.value, Some(b"from-client-1".to_vec()));
+    assert_eq!(
+        result.value.as_deref(),
+        Some(b"from-client-1".to_vec()).as_deref()
+    );
 
     // Client 2 writes
     client2
@@ -1545,14 +1445,17 @@ async fn test_multiple_clients() {
 
     // Client 1 reads
     let result = client1.get("mc/key2".to_string()).await.unwrap();
-    assert_eq!(result.value, Some(b"from-client-2".to_vec()));
+    assert_eq!(
+        result.value.as_deref(),
+        Some(b"from-client-2".to_vec()).as_deref()
+    );
 
     client1
         .delete_range("mc/".to_string(), "mc/~".to_string())
         .await
         .unwrap();
-    client1.shutdown().await.unwrap();
-    client2.shutdown().await.unwrap();
+    client1.close().await.unwrap();
+    client2.close().await.unwrap();
 }
 
 // ============================================================
@@ -1574,11 +1477,8 @@ async fn test_cas_loop() {
     let mut current_version = initial.version.version_id;
     for i in 1..=5 {
         let result = client
-            .put_with_options(
-                "cas/counter".to_string(),
-                format!("{}", i).into_bytes(),
-                vec![PutOption::ExpectVersionId(current_version)],
-            )
+            .put("cas/counter".to_string(), format!("{}", i).into_bytes())
+            .expected_version_id(current_version)
             .await
             .unwrap();
         current_version = result.version.version_id;
@@ -1586,13 +1486,16 @@ async fn test_cas_loop() {
 
     // Verify final value
     let final_result = client.get("cas/counter".to_string()).await.unwrap();
-    assert_eq!(final_result.value, Some(b"5".to_vec()));
+    assert_eq!(
+        final_result.value.as_deref(),
+        Some(b"5".to_vec()).as_deref()
+    );
 
     client
         .delete_range("cas/".to_string(), "cas/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1612,13 +1515,13 @@ async fn test_binary_values() {
         .unwrap();
 
     let result = client.get("bin/data".to_string()).await.unwrap();
-    assert_eq!(result.value, Some(binary_data));
+    assert_eq!(result.value.as_deref(), Some(binary_data).as_deref());
 
     client
         .delete_range("bin/".to_string(), "bin/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1644,7 +1547,7 @@ async fn test_overwrite_different_sizes() {
         .unwrap();
 
     let result = client.get("sizes/key".to_string()).await.unwrap();
-    assert_eq!(result.value, Some(large_value));
+    assert_eq!(result.value.as_deref(), Some(large_value).as_deref());
 
     // Overwrite back to a small value
     client
@@ -1653,13 +1556,13 @@ async fn test_overwrite_different_sizes() {
         .unwrap();
 
     let result = client.get("sizes/key".to_string()).await.unwrap();
-    assert_eq!(result.value, Some(b"tiny".to_vec()));
+    assert_eq!(result.value.as_deref(), Some(b"tiny".to_vec()).as_deref());
 
     client
         .delete_range("sizes/".to_string(), "sizes/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 // ============================================================
@@ -1683,21 +1586,15 @@ async fn test_concurrent_cas_conflict() {
     let c2 = client.clone();
 
     let h1 = tokio::spawn(async move {
-        c1.put_with_options(
-            "conflict/key".to_string(),
-            b"v1-from-c1".to_vec(),
-            vec![PutOption::ExpectVersionId(version)],
-        )
-        .await
+        c1.put("conflict/key".to_string(), b"v1-from-c1".to_vec())
+            .expected_version_id(version)
+            .await
     });
 
     let h2 = tokio::spawn(async move {
-        c2.put_with_options(
-            "conflict/key".to_string(),
-            b"v1-from-c2".to_vec(),
-            vec![PutOption::ExpectVersionId(version)],
-        )
-        .await
+        c2.put("conflict/key".to_string(), b"v1-from-c2".to_vec())
+            .expected_version_id(version)
+            .await
     });
 
     let r1 = h1.await.unwrap();
@@ -1714,7 +1611,7 @@ async fn test_concurrent_cas_conflict() {
         .delete_range("conflict/".to_string(), "conflict/~".to_string())
         .await
         .unwrap();
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }
 
 /// P1-3: building a client against an unreachable cluster must fail fast within
