@@ -2,10 +2,10 @@ use crate::client::Notification;
 use crate::errors::OxiaError;
 use crate::oxia::NotificationsRequest;
 use crate::provider_manager::ProviderManager;
+use crate::retry::{retry_until_cancelled, RetryError};
 use crate::shard_manager::ShardManager;
-use backoff::{Error, ExponentialBackoff};
 use dashmap::DashMap;
-use log::{info, warn};
+use log::info;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use task::JoinHandle;
@@ -80,14 +80,14 @@ async fn start_notification_listener(
         async move {
             let mut provider = match shard_manager.get_leader(shard_id) {
                 None => {
-                    return Err(Error::transient(OxiaError::LeaderNotFound {
+                    return Err(RetryError::transient(OxiaError::LeaderNotFound {
                         shard: shard_id,
                     }))
                 }
                 Some(leader) => provider_manager
                     .get_provider(leader.service_address)
                     .await
-                    .map_err(Error::transient)?,
+                    .map_err(RetryError::transient)?,
             };
             let mut streaming = provider
                 .get_notifications(NotificationsRequest {
@@ -95,7 +95,7 @@ async fn start_notification_listener(
                     start_offset_exclusive: Some(offset_ref.load(Ordering::Acquire)),
                 })
                 .await
-                .map_err(|err| Error::transient(OxiaError::from(err)))?
+                .map_err(|err| RetryError::transient(OxiaError::from(err)))?
                 .into_inner();
             loop {
                 tokio::select! {
@@ -105,12 +105,12 @@ async fn start_notification_listener(
                 },
                 message = streaming.next() => match message {
                         None => {
-                            return Err(Error::transient(OxiaError::Disconnected(
+                            return Err(RetryError::transient(OxiaError::Disconnected(
                                 "notification stream closed by server".to_string(),
                             ))); }
                         Some(notification) => {
                             let batch = notification.map_err(|err| {
-                                Error::transient(OxiaError::from(err))
+                                RetryError::transient(OxiaError::from(err))
                             })?;
                             offset_ref.store(batch.offset, Ordering::Release);
                             for entry in batch.notifications {
@@ -126,14 +126,7 @@ async fn start_notification_listener(
             Ok(())
         }
     };
-    let notify = |err, duration| {
-        warn!(
-            "Transient failure when listen notification. error: {:?} retry-after: {:?}.",
-            err, duration
-        );
-    };
-    let backoff = ExponentialBackoff::default();
-    _ = backoff::future::retry_notify(backoff, defer, notify).await;
+    retry_until_cancelled(&passing_context, "notifications", defer).await;
 }
 
 pub struct NotificationManager {

@@ -1,9 +1,9 @@
 use crate::errors::OxiaError;
 use crate::oxia::GetSequenceUpdatesRequest;
 use crate::provider_manager::ProviderManager;
+use crate::retry::{retry_until_cancelled, RetryError};
 use crate::shard_manager::ShardManager;
-use backoff::{Error, ExponentialBackoff};
-use log::{info, warn};
+use log::info;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
@@ -69,23 +69,23 @@ async fn start_listener(
         let shard_manager = shard_manager.clone();
         async move {
             match shard_manager.get_shard(&partition_key) {
-                None => Err(Error::transient(OxiaError::NoShardForKey {
+                None => Err(RetryError::transient(OxiaError::NoShardForKey {
                     key: partition_key.clone(),
                 })),
                 Some(shard) => match shard_manager.get_leader(shard) {
-                    None => Err(Error::transient(OxiaError::LeaderNotFound { shard })),
+                    None => Err(RetryError::transient(OxiaError::LeaderNotFound { shard })),
                     Some(leader) => {
                         let mut provider = provider_manager
                             .get_provider(leader.service_address)
                             .await
-                            .map_err(Error::transient)?;
+                            .map_err(RetryError::transient)?;
                         let mut streaming = provider
                             .get_sequence_updates(Request::new(GetSequenceUpdatesRequest {
                                 shard,
                                 key,
                             }))
                             .await
-                            .map_err(|err| Error::transient(OxiaError::from(err)))?
+                            .map_err(|err| RetryError::transient(OxiaError::from(err)))?
                             .into_inner();
                         loop {
                             tokio::select! {
@@ -97,13 +97,13 @@ async fn start_listener(
                                     match next_response {
                                     None => {
                                         info!("Sequence updates stream closed by server.");
-                                        return Err(Error::transient(OxiaError::Disconnected(
+                                        return Err(RetryError::transient(OxiaError::Disconnected(
                                             "sequence updates stream closed by server".to_string(),
                                         )));
                                     }
                                     Some(result) => {
                                         let response = result
-                                            .map_err(|err| Error::transient(OxiaError::from(err)))?;
+                                            .map_err(|err| RetryError::transient(OxiaError::from(err)))?;
                                         if sender.send(response.highest_sequence_key).await.is_err() {
                                             // Receiver dropped, stop listening
                                             return Ok(());
@@ -117,11 +117,5 @@ async fn start_listener(
             }
         }
     };
-    let _ = backoff::future::retry_notify(ExponentialBackoff::default(), defer, |err, duration| {
-        warn!(
-            "Transient failure when listen sequence update. error: {:?} retry-after: {:?}.",
-            err, duration
-        );
-    })
-    .await;
+    retry_until_cancelled(&context, "sequence-updates", defer).await;
 }

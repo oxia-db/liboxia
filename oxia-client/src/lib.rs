@@ -11,6 +11,7 @@ mod key;
 mod notification_manager;
 mod operations;
 mod provider_manager;
+mod retry;
 mod sequence_updates_manager;
 mod session_manager;
 mod shard_manager;

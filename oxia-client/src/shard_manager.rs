@@ -4,9 +4,9 @@ use crate::hash::shard_key_hash;
 use crate::oxia::shard_assignment::ShardBoundaries;
 use crate::oxia::{ShardAssignment, ShardAssignmentsRequest, ShardKeyRouter};
 use crate::provider_manager::ProviderManager;
-use backoff::{Error, ExponentialBackoff};
+use crate::retry::{retry_until_cancelled, RetryError};
 use dashmap::DashMap;
-use log::{info, warn};
+use log::info;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
@@ -63,13 +63,13 @@ async fn start_assignments_listener(
                 .provider_manager
                 .get_provider(local_address)
                 .await
-                .map_err(Error::transient)?;
+                .map_err(RetryError::transient)?;
             let mut streaming = provider
                 .get_shard_assignments(ShardAssignmentsRequest {
                     namespace: ns.clone(),
                 })
                 .await
-                .map_err(|err| Error::transient(OxiaError::from(err)))?
+                .map_err(|err| RetryError::transient(OxiaError::from(err)))?
                 .into_inner();
             loop {
                 tokio::select! {
@@ -101,7 +101,7 @@ async fn start_assignments_listener(
                             }
                         }
                         Err(stream_status) => {
-                             return Err(Error::transient(OxiaError::from(stream_status)));
+                             return Err(RetryError::transient(OxiaError::from(stream_status)));
                         }
                     }
                     }
@@ -109,14 +109,7 @@ async fn start_assignments_listener(
             }
         }
     };
-    let backoff = ExponentialBackoff::default();
-    let _ = backoff::future::retry_notify(backoff, op_defer, |err, duration| {
-        warn!(
-            "Transient failure receiving shard assignments. error: {:?} retry-after: {:?}.",
-            err, duration
-        )
-    })
-    .await;
+    retry_until_cancelled(&context, "shard-assignments", op_defer).await;
 }
 
 impl ShardManager {
