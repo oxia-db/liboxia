@@ -6,6 +6,7 @@ pub mod client;
 pub mod client_builder;
 pub mod client_options;
 pub mod errors;
+mod hash;
 mod key;
 mod notification_manager;
 mod operations;

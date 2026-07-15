@@ -12,7 +12,7 @@ prost = "0.13"
 tokio = { version = "1.47.0", features = ["rt-multi-thread", "macros"] }
 thiserror = "2.0.12"
 dashmap = "6.1.0"
-xxhash-rust = { version = "0.8.5", features = ["xxh32", "const_xxh32"] }
+xxhash-rust = { version = "0.8.5", features = ["xxh3"] }
 uuid = { version = "1.7", features = ["v4"] }
 tokio-util = "0.7"
 log = "0.4"
