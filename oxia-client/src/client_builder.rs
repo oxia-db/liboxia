@@ -30,6 +30,7 @@ pub struct OxiaClientBuilder {
     batch_max_size: Option<u32>,
     max_requests_per_batch: Option<u32>,
     session_timeout: Option<Duration>,
+    session_keep_alive: Option<Duration>,
     request_timeout: Option<Duration>,
 }
 
@@ -73,12 +74,19 @@ impl OxiaClientBuilder {
         self
     }
 
+    /// Interval between session keep-alive heartbeats. Defaults to
+    /// `session_timeout / 10` when not set.
+    pub fn session_keep_alive(mut self, session_keep_alive: Duration) -> Self {
+        self.session_keep_alive = Some(session_keep_alive);
+        self
+    }
+
     pub fn request_timeout(mut self, request_timeout: Duration) -> Self {
         self.request_timeout = Some(request_timeout);
         self
     }
 
-    pub async fn build(self) -> Result<OxiaClient, OxiaError> {
+    fn assemble_options(self) -> OxiaClientOptions {
         let mut options = OxiaClientOptions::default();
         if let Some(service_address) = self.service_address {
             options.service_address = service_address
@@ -101,9 +109,46 @@ impl OxiaClientBuilder {
         if let Some(session_timeout) = self.session_timeout {
             options.session_timeout = session_timeout;
         }
+        // Default the keep-alive interval to session_timeout/10, matching the
+        // reference client, once the final session timeout is known.
+        options.session_keep_alive = self
+            .session_keep_alive
+            .unwrap_or(options.session_timeout / 10);
         if let Some(request_timeout) = self.request_timeout {
             options.request_timeout = request_timeout;
         }
-        OxiaClient::new(options).await
+        options
+    }
+
+    pub async fn build(self) -> Result<OxiaClient, OxiaError> {
+        OxiaClient::new(self.assemble_options()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keep_alive_defaults_to_a_tenth_of_the_session_timeout() {
+        let options = OxiaClientBuilder::new()
+            .session_timeout(Duration::from_secs(30))
+            .assemble_options();
+        assert_eq!(options.session_keep_alive, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn keep_alive_can_be_overridden() {
+        let options = OxiaClientBuilder::new()
+            .session_timeout(Duration::from_secs(30))
+            .session_keep_alive(Duration::from_millis(500))
+            .assemble_options();
+        assert_eq!(options.session_keep_alive, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn default_keep_alive_tracks_the_default_session_timeout() {
+        let options = OxiaClientBuilder::new().assemble_options();
+        assert_eq!(options.session_keep_alive, options.session_timeout / 10);
     }
 }

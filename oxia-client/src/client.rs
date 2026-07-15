@@ -367,6 +367,7 @@ impl OxiaClient {
         let session_manager = Arc::new(SessionManager::new(
             options.identity.clone(),
             options.session_timeout,
+            options.session_keep_alive,
             shard_manager.clone(),
             provider_manager.clone(),
         ));
