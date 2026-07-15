@@ -215,9 +215,12 @@ impl fmt::Display for Notification {
     }
 }
 
-impl From<(String, crate::oxia::Notification)> for Notification {
-    fn from(tuple: (String, crate::oxia::Notification)) -> Self {
-        let (key, notification) = tuple;
+impl From<crate::oxia::NotificationEntry> for Notification {
+    fn from(entry: crate::oxia::NotificationEntry) -> Self {
+        let key = entry.key.unwrap_or_default();
+        let Some(notification) = entry.value else {
+            return Notification::Unknown();
+        };
         if let Ok(notification_type) = NotificationType::try_from(notification.r#type) {
             return match notification_type {
                 NotificationType::KeyCreated => Notification::KeyCreated(KeyCreated {

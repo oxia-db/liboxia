@@ -74,6 +74,9 @@ impl ToProtobuf<PutRequest> for PutOperation {
             partition_key: self.partition_key.clone(),
             sequence_key_delta: self.sequence_key_delta.clone(),
             secondary_indexes: self.secondary_indexes.clone(),
+            // Server-side version overrides, used only by data-migration tooling.
+            override_version_id: None,
+            override_modifications_count: None,
         }
     }
 }
@@ -354,6 +357,7 @@ impl ToProtobuf<ListRequest> for ListOperation {
             start_inclusive: self.min_key_inclusive.clone(),
             end_exclusive: self.max_key_exclusive.clone(),
             secondary_index_name: self.secondary_index_name.clone(),
+            include_internal_keys: false,
         }
     }
 }
@@ -420,6 +424,7 @@ impl ToProtobuf<RangeScanRequest> for RangeScanOperation {
             start_inclusive: self.min_key_inclusive.clone(),
             end_exclusive: self.max_key_exclusive.clone(),
             secondary_index_name: self.secondary_index_name.clone(),
+            include_internal_keys: false,
         }
     }
 }
