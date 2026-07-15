@@ -28,6 +28,7 @@ struct Session {
     /// Set to `false` by the keep-alive task once the server reports the session
     /// no longer exists, so [`SessionManager::get_session_id`] re-creates it.
     alive: Arc<AtomicBool>,
+    request_timeout: Duration,
     inner: Arc<Inner>,
 }
 
@@ -36,6 +37,7 @@ impl Session {
         shard_id: i64,
         session_id: i64,
         keep_alive_interval: Duration,
+        request_timeout: Duration,
         shard_manager: Arc<ShardManager>,
         provider_manager: Arc<ProviderManager>,
     ) -> Self {
@@ -48,12 +50,14 @@ impl Session {
             shard_id,
             session_id,
             keep_alive_interval,
+            request_timeout,
             alive.clone(),
         ))));
         let session = Self {
             handle,
             context,
             alive,
+            request_timeout,
             inner: Arc::new(Inner {
                 id: session_id,
                 shard_id,
@@ -89,6 +93,7 @@ async fn start_keep_alive(
     shard_id: i64,
     session_id: i64,
     keep_alive_interval: Duration,
+    request_timeout: Duration,
     alive: Arc<AtomicBool>,
 ) {
     let op_defer = || {
@@ -114,9 +119,9 @@ async fn start_keep_alive(
                                 return Ok(());
                             },
                             _ = ticker.tick() => {
-                                if let Err(err) = provider
-                                    .keep_alive(Request::new(SessionHeartbeat { shard: shard_id, session_id }))
-                                    .await
+                                let mut heartbeat = Request::new(SessionHeartbeat { shard: shard_id, session_id });
+                                heartbeat.set_timeout(request_timeout);
+                                if let Err(err) = provider.keep_alive(heartbeat).await
                                 {
                                     if err.code() as i32 == CODE_SESSION_NOT_FOUND {
                                         info!("Session {session_id} on shard {shard_id} expired; it will be re-created on next use.");
@@ -142,13 +147,12 @@ impl Session {
         let provider_manager = self.inner.provider_manager.clone();
         if let Some(node) = shard_manager.get_leader(self.inner.shard_id) {
             let mut provider = provider_manager.get_provider(node.service_address).await?;
-            let result = provider
-                .close_session(Request::new(CloseSessionRequest {
-                    shard: self.inner.shard_id,
-                    session_id: self.inner.id,
-                }))
-                .await
-                .map_err(OxiaError::from);
+            let mut close = Request::new(CloseSessionRequest {
+                shard: self.inner.shard_id,
+                session_id: self.inner.id,
+            });
+            close.set_timeout(self.request_timeout);
+            let result = provider.close_session(close).await.map_err(OxiaError::from);
             if let Err(err) = result {
                 warn!(
                     "Failed to close session. shard_id={:?} session_id={:?} error={:?}",
@@ -174,6 +178,7 @@ pub(crate) struct SessionManager {
     identity: String,
     session_timeout: Duration,
     session_keep_alive: Duration,
+    request_timeout: Duration,
     sessions: DashMap<i64, OnceCell<Session>>,
     shard_manager: Arc<ShardManager>,
     provider_manager: Arc<ProviderManager>,
@@ -184,6 +189,7 @@ impl SessionManager {
         identity: String,
         session_timeout: Duration,
         session_keep_alive: Duration,
+        request_timeout: Duration,
         shard_manager: Arc<ShardManager>,
         provider_manager: Arc<ProviderManager>,
     ) -> Self {
@@ -191,6 +197,7 @@ impl SessionManager {
             identity,
             session_timeout,
             session_keep_alive,
+            request_timeout,
             sessions: DashMap::new(),
             shard_manager,
             provider_manager,
@@ -214,12 +221,14 @@ impl SessionManager {
                             .provider_manager
                             .get_provider(node.service_address)
                             .await?;
+                        let mut create = Request::new(CreateSessionRequest {
+                            shard: shard_id,
+                            session_timeout_ms: self.session_timeout.as_millis() as u32,
+                            client_identity: self.identity.clone(),
+                        });
+                        create.set_timeout(self.request_timeout);
                         let response = provider
-                            .create_session(Request::new(CreateSessionRequest {
-                                shard: shard_id,
-                                session_timeout_ms: self.session_timeout.as_millis() as u32,
-                                client_identity: self.identity.clone(),
-                            }))
+                            .create_session(create)
                             .await
                             .map_err(OxiaError::from)?;
                         let session_id = response.into_inner().session_id;
@@ -227,6 +236,7 @@ impl SessionManager {
                             shard_id,
                             session_id,
                             self.session_keep_alive,
+                            self.request_timeout,
                             self.shard_manager.clone(),
                             self.provider_manager.clone(),
                         ))

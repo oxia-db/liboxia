@@ -3,6 +3,7 @@ use crate::oxia::{WriteRequest, WriteResponse};
 use log::{info, warn};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::Receiver;
 use tokio::sync::{oneshot, Mutex};
@@ -32,6 +33,7 @@ pub(crate) struct WriteStream {
     inner: Arc<Mutex<Inner>>,
     defer_response: Mutex<Option<Receiver<WriteResponse>>>,
     handle: Mutex<Option<JoinHandle<()>>>,
+    request_timeout: Duration,
 }
 
 impl Drop for WriteStream {
@@ -82,23 +84,37 @@ impl WriteStream {
             return Err(OxiaError::Disconnected(err.to_string()));
         }
         drop(inner_guard);
-        rx.await
-            .map_err(|err| OxiaError::Disconnected(err.to_string()))
+        self.await_response(rx).await
     }
 
     pub(crate) async fn get_defer_response(&self) -> Option<Result<WriteResponse, OxiaError>> {
         let mut guard = self.defer_response.lock().await;
-        let option = guard.take();
-        option.as_ref()?;
-        Some(
-            option
-                .unwrap()
-                .await
-                .map_err(|err| OxiaError::Disconnected(err.to_string())),
-        )
+        let rx = guard.take()?;
+        drop(guard);
+        Some(self.await_response(rx).await)
     }
 
-    pub(crate) fn new(tx: UnboundedSender<WriteRequest>) -> Self {
+    /// Waits for a batch's response, bounded by the request timeout. A timeout
+    /// means the stream is wedged (the server stopped responding): mark it dead
+    /// and fail its in-flight requests so the caller sees a `Timeout` and the
+    /// next write tears the stream down and re-creates it.
+    async fn await_response(
+        &self,
+        rx: Receiver<WriteResponse>,
+    ) -> Result<WriteResponse, OxiaError> {
+        match tokio::time::timeout(self.request_timeout, rx).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(err)) => Err(OxiaError::Disconnected(err.to_string())),
+            Err(_) => {
+                let mut inner_guard = self.inner.lock().await;
+                inner_guard.alive = false;
+                inner_guard.fail_inflight();
+                Err(OxiaError::Timeout)
+            }
+        }
+    }
+
+    pub(crate) fn new(tx: UnboundedSender<WriteRequest>, request_timeout: Duration) -> Self {
         let inner = Arc::new(Mutex::new(Inner {
             alive: true,
             tx,
@@ -110,6 +126,7 @@ impl WriteStream {
             inner,
             defer_response: Mutex::new(None),
             handle: Mutex::new(None),
+            request_timeout,
         }
     }
 

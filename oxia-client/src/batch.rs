@@ -9,8 +9,9 @@ use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
 use crate::write_stream_manager::WriteStreamManager;
 use std::sync::Arc;
+use std::time::Duration;
 use tonic::codegen::tokio_stream::StreamExt;
-use tonic::{Response, Streaming};
+use tonic::{Request, Response, Streaming};
 
 pub enum Batch {
     Read(ReadBatch),
@@ -52,6 +53,7 @@ pub(crate) struct ReadBatch {
     shard_manager: Arc<ShardManager>,
     provider_manager: Arc<ProviderManager>,
     max_requests: u32,
+    request_timeout: Duration,
 }
 impl ReadBatch {
     pub fn new(
@@ -59,6 +61,7 @@ impl ReadBatch {
         shard_manager: Arc<ShardManager>,
         provider_manager: Arc<ProviderManager>,
         max_requests: u32,
+        request_timeout: Duration,
     ) -> Self {
         ReadBatch {
             get_inflight: Vec::new(),
@@ -66,6 +69,7 @@ impl ReadBatch {
             shard_manager,
             provider_manager,
             max_requests,
+            request_timeout,
         }
     }
 
@@ -105,6 +109,8 @@ impl ReadBatch {
                 for operation in self.get_inflight.iter() {
                     request.gets.push(operation.to_proto());
                 }
+                let mut request = Request::new(request);
+                request.set_timeout(self.request_timeout);
                 match provider.read(request).await {
                     Ok(response) => {
                         if let Err(err) = self.receive_all(response).await {
