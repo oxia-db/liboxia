@@ -1,5 +1,4 @@
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::{SessionDoesNotExist, ShardLeaderNotFound, UnexpectedStatus};
 use crate::oxia::{CloseSessionRequest, CreateSessionRequest, SessionHeartbeat};
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
@@ -85,7 +84,9 @@ async fn start_keep_alive(
         let local_context = context.clone();
         async move {
             match local_shard_manager.get_leader(shard_id) {
-                None => Err(Error::transient(ShardLeaderNotFound(shard_id))),
+                None => Err(Error::transient(OxiaError::LeaderNotFound {
+                    shard: shard_id,
+                })),
                 Some(leader) => {
                     let mut provider = local_provider_manager
                         .get_provider(leader.service_address)
@@ -105,9 +106,9 @@ async fn start_keep_alive(
                                     .map_err(|err| {
                                         if err.code() as i32 == CODE_SESSION_NOT_FOUND {
                                             info!("Session keep-alive exit due to session not found.");
-                                            return Error::permanent(SessionDoesNotExist());
+                                            return Error::permanent(OxiaError::SessionExpired);
                                         }
-                                        Error::transient(UnexpectedStatus(err.to_string()))
+                                        Error::transient(OxiaError::from(err))
                                     })?;
                             }
                         }
@@ -138,7 +139,7 @@ impl Session {
                     session_id: self.inner.id,
                 }))
                 .await
-                .map_err(|err| UnexpectedStatus(err.to_string()));
+                .map_err(OxiaError::from);
             if let Err(err) = result {
                 warn!(
                     "Failed to close session. shard_id={:?} session_id={:?} error={:?}",
@@ -154,7 +155,7 @@ impl Session {
         if let Some(handle) = guard.take() {
             handle
                 .await
-                .map_err(|err| UnexpectedStatus(err.to_string()))?
+                .map_err(|err| OxiaError::Disconnected(err.to_string()))?
         }
         Ok(())
     }
@@ -189,7 +190,7 @@ impl SessionManager {
         let session = session_cell
             .get_or_try_init(|| async {
                 match self.shard_manager.get_leader(shard_id) {
-                    None => Err(ShardLeaderNotFound(shard_id)),
+                    None => Err(OxiaError::LeaderNotFound { shard: shard_id }),
                     Some(node) => {
                         let mut provider = self
                             .provider_manager
@@ -202,7 +203,7 @@ impl SessionManager {
                                 client_identity: self.identity.clone(),
                             }))
                             .await
-                            .map_err(|err| UnexpectedStatus(err.to_string()))?;
+                            .map_err(OxiaError::from)?;
                         let session_id = response.into_inner().session_id;
                         Ok(Session::new(
                             shard_id,
@@ -227,7 +228,7 @@ impl SessionManager {
         }
         while let Some(result) = joiner.join_next().await {
             result.map_err(|err| {
-                UnexpectedStatus(format!("Session task failed to join: {}", err))
+                OxiaError::Disconnected(format!("Session task failed to join: {}", err))
             })??;
         }
         Ok(())

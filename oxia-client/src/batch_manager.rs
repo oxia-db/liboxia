@@ -1,6 +1,5 @@
 use crate::batch::{Batch, ReadBatch, WriteBatch};
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::UnexpectedStatus;
 use crate::operations::Operation;
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
@@ -90,9 +89,10 @@ impl BatchManager {
     }
 
     pub fn add(&self, operation: Operation) -> Result<(), OxiaError> {
-        self.tx
-            .send(operation)
-            .map_err(|err| UnexpectedStatus(err.to_string()))?;
+        // The batcher's receiver is only dropped when the batcher has been shut
+        // down, so a send failure means the client (or this shard's batcher) is
+        // gone.
+        self.tx.send(operation).map_err(|_| OxiaError::Closed)?;
         Ok(())
     }
 
@@ -102,7 +102,7 @@ impl BatchManager {
         if let Some(handle) = handle_guard.take() {
             handle
                 .await
-                .map_err(|err| UnexpectedStatus(err.to_string()))?;
+                .map_err(|err| OxiaError::Disconnected(err.to_string()))?;
         }
         Ok(())
     }

@@ -1,5 +1,4 @@
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::{InternalRetryable, UnexpectedStatus};
 use crate::oxia::{WriteRequest, WriteResponse};
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
@@ -26,19 +25,19 @@ impl WriteStreamManager {
     pub async fn write(&self, request: WriteRequest) -> Result<WriteResponse, OxiaError> {
         // todo: make request Rc
         loop {
-            match self.write0(request.clone()).await {
-                Ok(response) => return Ok(response),
-                Err(InternalRetryable()) => continue,
-                Err(err) => return Err(err),
+            // `write0` returns Ok(None) when the cached stream was found dead and
+            // torn down; loop to retry with a freshly created stream.
+            if let Some(response) = self.write0(request.clone()).await? {
+                return Ok(response);
             }
         }
     }
 
-    async fn write0(&self, request: WriteRequest) -> Result<WriteResponse, OxiaError> {
+    async fn write0(&self, request: WriteRequest) -> Result<Option<WriteResponse>, OxiaError> {
         let shard_id = request.shard.unwrap();
         let option = self.shard_manager.get_leader(shard_id);
         if option.is_none() {
-            return Err(OxiaError::ShardLeaderNotFound(shard_id));
+            return Err(OxiaError::LeaderNotFound { shard: shard_id });
         }
         let defer_init = || async {
             let mut provider = self
@@ -75,12 +74,12 @@ impl WriteStreamManager {
             if let Some(stream) = cell.take() {
                 stream.shutdown().await?;
             }
-            return Err(InternalRetryable());
+            return Ok(None);
         }
         if initialized {
-            return w_stream.send(request).await;
+            return w_stream.send(request).await.map(Some);
         }
-        w_stream.get_defer_response().await.unwrap()
+        Ok(Some(w_stream.get_defer_response().await.unwrap()?))
     }
 
     pub async fn shutdown(self) -> Result<(), OxiaError> {
@@ -94,8 +93,8 @@ impl WriteStreamManager {
         }
         while let Some(result) = joiner.join_next().await {
             result.map_err(|err| {
-                UnexpectedStatus(format!(
-                    "write stream nanager background task failed to join: {}",
+                OxiaError::Disconnected(format!(
+                    "write stream manager background task failed to join: {}",
                     err
                 ))
             })??;

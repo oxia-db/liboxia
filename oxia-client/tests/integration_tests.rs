@@ -104,7 +104,7 @@ async fn test_delete() {
     client.delete("test/del".to_string()).await.unwrap();
 
     let result = client.get("test/del".to_string()).await;
-    assert!(matches!(result, Err(OxiaError::KeyNotFound())));
+    assert!(matches!(result, Err(OxiaError::KeyNotFound)));
 
     client.shutdown().await.unwrap();
 }
@@ -115,7 +115,7 @@ async fn test_get_nonexistent() {
     let client = new_client(&address).await;
 
     let result = client.get("nonexistent/key".to_string()).await;
-    assert!(matches!(result, Err(OxiaError::KeyNotFound())));
+    assert!(matches!(result, Err(OxiaError::KeyNotFound)));
 
     client.shutdown().await.unwrap();
 }
@@ -261,7 +261,7 @@ async fn test_expected_version_id() {
             vec![PutOption::ExpectVersionId(r1.version.version_id)],
         )
         .await;
-    assert!(matches!(err, Err(OxiaError::UnexpectedVersionId())));
+    assert!(matches!(err, Err(OxiaError::UnexpectedVersionId)));
 
     client
         .delete_range("ver/".to_string(), "ver/~".to_string())
@@ -293,7 +293,7 @@ async fn test_expected_record_not_exists() {
             vec![PutOption::ExpectedRecordNotExists()],
         )
         .await;
-    assert!(matches!(err, Err(OxiaError::UnexpectedVersionId())));
+    assert!(matches!(err, Err(OxiaError::UnexpectedVersionId)));
 
     client
         .delete_range("new/".to_string(), "new/~".to_string())
@@ -319,7 +319,7 @@ async fn test_delete_with_expected_version() {
             vec![DeleteOption::ExpectVersionId(999)],
         )
         .await;
-    assert!(matches!(err, Err(OxiaError::UnexpectedVersionId())));
+    assert!(matches!(err, Err(OxiaError::UnexpectedVersionId)));
 
     // Delete with correct version should succeed
     client
@@ -331,7 +331,7 @@ async fn test_delete_with_expected_version() {
         .unwrap();
 
     let get = client.get("delver/key".to_string()).await;
-    assert!(matches!(get, Err(OxiaError::KeyNotFound())));
+    assert!(matches!(get, Err(OxiaError::KeyNotFound)));
 
     client.shutdown().await.unwrap();
 }
@@ -476,7 +476,7 @@ async fn test_ephemeral_keys() {
     for attempt in 0..10 {
         tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await;
         let result = client2.get("eph/key1".to_string()).await;
-        if matches!(result, Err(OxiaError::KeyNotFound())) {
+        if matches!(result, Err(OxiaError::KeyNotFound)) {
             found_deleted = true;
             break;
         }
@@ -964,7 +964,7 @@ async fn test_delete_nonexistent_key() {
     // Deleting a key that doesn't exist should succeed (idempotent)
     let result = client.delete("nonexistent/key123".to_string()).await;
     // Oxia returns KeyNotFound when deleting non-existent keys
-    assert!(result.is_ok() || matches!(result, Err(OxiaError::KeyNotFound())));
+    assert!(result.is_ok() || matches!(result, Err(OxiaError::KeyNotFound)));
 
     client.shutdown().await.unwrap();
 }
@@ -1014,7 +1014,7 @@ async fn test_sequential_operations() {
 
     // Verify deleted
     let get3 = client.get("seq-ops/key".to_string()).await;
-    assert!(matches!(get3, Err(OxiaError::KeyNotFound())));
+    assert!(matches!(get3, Err(OxiaError::KeyNotFound)));
 
     client.shutdown().await.unwrap();
 }
@@ -1708,7 +1708,7 @@ async fn test_concurrent_cas_conflict() {
 
     assert_eq!(successes.len(), 1, "Exactly one CAS should succeed");
     assert_eq!(failures.len(), 1, "Exactly one CAS should fail");
-    assert!(matches!(failures[0], Err(OxiaError::UnexpectedVersionId())));
+    assert!(matches!(failures[0], Err(OxiaError::UnexpectedVersionId)));
 
     client
         .delete_range("conflict/".to_string(), "conflict/~".to_string())

@@ -1,6 +1,5 @@
 use crate::client::Notification;
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::{ShardLeaderNotFound, UnexpectedStatus};
 use crate::oxia::NotificationsRequest;
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
@@ -58,7 +57,7 @@ impl NotificationListener {
         if let Some(handle) = handle_guard.take() {
             handle
                 .await
-                .map_err(|err| UnexpectedStatus(err.to_string()))?;
+                .map_err(|err| OxiaError::Disconnected(err.to_string()))?;
         }
         Ok(())
     }
@@ -80,7 +79,11 @@ async fn start_notification_listener(
         let sender = sender.clone();
         async move {
             let mut provider = match shard_manager.get_leader(shard_id) {
-                None => return Err(Error::transient(ShardLeaderNotFound(shard_id))),
+                None => {
+                    return Err(Error::transient(OxiaError::LeaderNotFound {
+                        shard: shard_id,
+                    }))
+                }
                 Some(leader) => provider_manager
                     .get_provider(leader.service_address)
                     .await
@@ -92,7 +95,7 @@ async fn start_notification_listener(
                     start_offset_exclusive: Some(offset_ref.load(Ordering::Acquire)),
                 })
                 .await
-                .map_err(|err| Error::transient(UnexpectedStatus(err.to_string())))?
+                .map_err(|err| Error::transient(OxiaError::from(err)))?
                 .into_inner();
             loop {
                 tokio::select! {
@@ -102,10 +105,12 @@ async fn start_notification_listener(
                 },
                 message = streaming.next() => match message {
                         None => {
-                            return Err(Error::transient(UnexpectedStatus(String::from( "streaming has closed by server", )))); }
+                            return Err(Error::transient(OxiaError::Disconnected(
+                                "notification stream closed by server".to_string(),
+                            ))); }
                         Some(notification) => {
                             let batch = notification.map_err(|err| {
-                                Error::transient(UnexpectedStatus(err.to_string()))
+                                Error::transient(OxiaError::from(err))
                             })?;
                             offset_ref.store(batch.offset, Ordering::Release);
                             for entry in batch.notifications {

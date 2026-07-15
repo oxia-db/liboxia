@@ -1,5 +1,4 @@
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::UnexpectedStatus;
 use crate::oxia::oxia_client_client::OxiaClientClient;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -18,9 +17,7 @@ impl ProviderManager {
         let once_cell = self.providers.entry(address.clone()).or_default();
         let client = once_cell
             .get_or_try_init(|| async {
-                let client = OxiaClientClient::connect(address)
-                    .await
-                    .map_err(|err| UnexpectedStatus(err.to_string()))?;
+                let client = OxiaClientClient::connect(address).await?;
                 Ok::<OxiaClientClient<Channel>, OxiaError>(client.clone())
             })
             .await?
