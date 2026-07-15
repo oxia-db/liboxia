@@ -1,0 +1,126 @@
+name: Publish crate-name reservations
+
+# One-time, manual maintenance around the liboxia -> oxia-client rename.
+# Every action here publishes to crates.io, which is PERMANENT (a version can
+# only be yanked, never deleted), so each action is opt-in via an input that
+# defaults to false. Run it from the Actions tab ("Run workflow") and tick only
+# the boxes you want. Uses the existing CRATE_TOKEN secret.
+#
+# The placeholder/deprecation crates are generated on the runner (not committed)
+# so they never become part of the workspace build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reserve_oxia:
+        description: 'Reserve the bare `oxia` name (publish empty oxia 0.0.0)'
+        type: boolean
+        default: false
+      deprecate_liboxia:
+        description: 'Publish liboxia 0.0.3 deprecation notice -> oxia-client'
+        type: boolean
+        default: false
+      yank_liboxia:
+        description: 'Yank the old liboxia 0.0.1 and 0.0.2'
+        type: boolean
+        default: false
+
+jobs:
+  publish:
+    name: Publish / yank crate names
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATE_TOKEN }}
+    steps:
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Reserve `oxia` name (empty placeholder)
+        if: ${{ inputs.reserve_oxia }}
+        run: |
+          dir="$RUNNER_TEMP/oxia"
+          mkdir -p "$dir/src"
+          cat > "$dir/Cargo.toml" <<'EOF'
+          [package]
+          name = "oxia"
+          version = "0.0.0"
+          edition = "2021"
+          description = "Reserved by the Oxia project. The Rust client SDK is published as `oxia-client` and imported as `oxia`."
+          license = "Apache-2.0"
+          repository = "https://github.com/oxia-db/oxia-client-rust"
+          homepage = "https://github.com/oxia-db/oxia-client-rust"
+          readme = "README.md"
+          keywords = ["oxia", "client"]
+          categories = ["database"]
+          EOF
+          cat > "$dir/src/lib.rs" <<'EOF'
+          //! This crate name is reserved by the Oxia project and contains no functionality.
+          //!
+          //! The official Oxia Rust client SDK is published as `oxia-client`
+          //! (<https://crates.io/crates/oxia-client>) and is imported as `oxia`.
+          //!
+          //! Source: <https://github.com/oxia-db/oxia-client-rust>
+          EOF
+          cat > "$dir/README.md" <<'EOF'
+          # oxia
+
+          **This crate name is reserved by the Oxia project and contains no functionality.**
+
+          The official Oxia Rust client SDK is published as
+          [`oxia-client`](https://crates.io/crates/oxia-client), imported as `oxia`:
+
+          ```toml
+          [dependencies]
+          oxia-client = "0.0.2"
+          ```
+
+          Source: <https://github.com/oxia-db/oxia-client-rust>
+          EOF
+          cargo publish --manifest-path "$dir/Cargo.toml"
+
+      - name: Publish `liboxia` deprecation notice
+        if: ${{ inputs.deprecate_liboxia }}
+        run: |
+          dir="$RUNNER_TEMP/liboxia"
+          mkdir -p "$dir/src"
+          cat > "$dir/Cargo.toml" <<'EOF'
+          [package]
+          name = "liboxia"
+          version = "0.0.3"
+          edition = "2021"
+          description = "DEPRECATED: renamed to `oxia-client`. This crate is no longer maintained."
+          license = "Apache-2.0"
+          repository = "https://github.com/oxia-db/oxia-client-rust"
+          homepage = "https://github.com/oxia-db/oxia-client-rust"
+          readme = "README.md"
+          EOF
+          cat > "$dir/src/lib.rs" <<'EOF'
+          //! # Deprecated - renamed to `oxia-client`
+          //!
+          //! This crate is no longer maintained. Switch to `oxia-client`
+          //! (<https://crates.io/crates/oxia-client>), which is imported as `oxia`.
+          //!
+          //! Source: <https://github.com/oxia-db/oxia-client-rust>
+          EOF
+          cat > "$dir/README.md" <<'EOF'
+          # liboxia — deprecated
+
+          **This crate has been renamed to [`oxia-client`](https://crates.io/crates/oxia-client)
+          and is no longer maintained.**
+
+          Update your dependency to `oxia-client`; the import root is unchanged (`use oxia::...`).
+
+          ```toml
+          [dependencies]
+          oxia-client = "0.0.2"
+          ```
+
+          Source: <https://github.com/oxia-db/oxia-client-rust>
+          EOF
+          cargo publish --manifest-path "$dir/Cargo.toml"
+
+      - name: Yank old `liboxia` versions
+        if: ${{ inputs.yank_liboxia }}
+        run: |
+          cargo yank liboxia@0.0.2
+          cargo yank liboxia@0.0.1
