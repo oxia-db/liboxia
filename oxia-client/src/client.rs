@@ -349,7 +349,7 @@ pub struct OxiaClient {
 
 impl OxiaClient {
     pub async fn new(options: OxiaClientOptions) -> Result<OxiaClient, OxiaError> {
-        let provider_manager = Arc::new(ProviderManager::new());
+        let provider_manager = Arc::new(ProviderManager::new(options.request_timeout));
         let shard_manager = Arc::new(
             ShardManager::new(ShardManagerOptions {
                 address: options.service_address.clone(),
@@ -363,11 +363,13 @@ impl OxiaClient {
             options.namespace.clone(),
             shard_manager.clone(),
             provider_manager.clone(),
+            options.request_timeout,
         ));
         let session_manager = Arc::new(SessionManager::new(
             options.identity.clone(),
             options.session_timeout,
             options.session_keep_alive,
+            options.request_timeout,
             shard_manager.clone(),
             provider_manager.clone(),
         ));
@@ -545,6 +547,7 @@ impl OxiaClient {
                 self.inner.options.batch_linger,
                 self.inner.options.batch_max_size,
                 self.inner.options.max_requests_per_batch,
+                self.inner.options.request_timeout,
             ))
         };
         let ref_mut = match batcher {
@@ -720,6 +723,7 @@ impl Client for OxiaClient {
                         leader,
                         local_operation,
                         self.inner.provider_manager.clone(),
+                        self.request_timeout(),
                     )
                     .await
                 }
@@ -732,6 +736,7 @@ impl Client for OxiaClient {
                 leader,
                 local_operation,
                 self.inner.provider_manager.clone(),
+                self.request_timeout(),
             ));
         }
         let mut output_keys: Vec<String> = Vec::new();
@@ -776,6 +781,7 @@ impl Client for OxiaClient {
                         leader,
                         local_operation,
                         self.inner.provider_manager.clone(),
+                        self.request_timeout(),
                     )
                     .await
                 }
@@ -788,6 +794,7 @@ impl Client for OxiaClient {
                 leader,
                 local_operation,
                 self.inner.provider_manager.clone(),
+                self.request_timeout(),
             ));
         }
         let mut output_records: Vec<GetResult> = Vec::new();
@@ -1031,14 +1038,14 @@ async fn range_scan_from_single_shard(
     leader: Node,
     local_operation: RangeScanOperation,
     provider_manager: Arc<ProviderManager>,
+    request_timeout: Duration,
 ) -> Result<RangeScanResult, OxiaError> {
     let mut provider = provider_manager
         .get_provider(leader.service_address)
         .await?;
-    let mut streaming = provider
-        .range_scan(Request::new(local_operation.to_proto()))
-        .await?
-        .into_inner();
+    let mut request = Request::new(local_operation.to_proto());
+    request.set_timeout(request_timeout);
+    let mut streaming = provider.range_scan(request).await?.into_inner();
     let mut records = Vec::new();
     while let Some(response) = streaming.next().await {
         match response {
@@ -1064,14 +1071,14 @@ async fn list_from_single_shard(
     leader: Node,
     local_operation: ListOperation,
     provider_manager: Arc<ProviderManager>,
+    request_timeout: Duration,
 ) -> Result<ListResult, OxiaError> {
     let mut provider = provider_manager
         .get_provider(leader.service_address)
         .await?;
-    let mut streaming = provider
-        .list(Request::new(local_operation.to_proto()))
-        .await?
-        .into_inner();
+    let mut request = Request::new(local_operation.to_proto());
+    request.set_timeout(request_timeout);
+    let mut streaming = provider.list(request).await?.into_inner();
     let mut keys = Vec::new();
     while let Some(response) = streaming.next().await {
         match response {

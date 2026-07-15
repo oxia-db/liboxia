@@ -5,6 +5,7 @@ use crate::shard_manager::ShardManager;
 use crate::write_stream::WriteStream;
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, OnceCell};
 use tokio::task::JoinSet;
 use tonic::codegen::tokio_stream::wrappers::UnboundedReceiverStream;
@@ -17,6 +18,7 @@ pub struct WriteStreamManager {
     namespace: String,
     shard_manager: Arc<ShardManager>,
     provider_manager: Arc<ProviderManager>,
+    request_timeout: Duration,
 
     streams: DashMap<i64, OnceCell<WriteStream>>,
 }
@@ -58,7 +60,7 @@ impl WriteStreamManager {
             // https://github.com/hyperium/hyper/issues/3737
             // We should put the first message into the stream to trigger it to actually send.
             // otherwise, write_stream will hang forever.
-            let w_stream = WriteStream::new(tx);
+            let w_stream = WriteStream::new(tx, self.request_timeout);
             w_stream.send_defer(request.clone()).await?;
             let streaming = provider
                 .write_stream(write_stream_request)
@@ -106,11 +108,13 @@ impl WriteStreamManager {
         namespace: String,
         shard_manager: Arc<ShardManager>,
         provider_manager: Arc<ProviderManager>,
+        request_timeout: Duration,
     ) -> Self {
         WriteStreamManager {
             namespace,
             shard_manager,
             provider_manager,
+            request_timeout,
             streams: DashMap::new(),
         }
     }

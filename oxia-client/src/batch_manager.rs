@@ -27,6 +27,7 @@ impl Batcher {
         provider_manager: Arc<ProviderManager>,
         write_stream_manager: Arc<WriteStreamManager>,
         max_requests_per_batch: u32,
+        request_timeout: Duration,
     ) -> Batch {
         match self {
             Batcher::Read => Batch::Read(ReadBatch::new(
@@ -34,6 +35,7 @@ impl Batcher {
                 shard_manager,
                 provider_manager,
                 max_requests_per_batch,
+                request_timeout,
             )),
             Batcher::Write => Batch::Write(WriteBatch::new(
                 shard_id,
@@ -67,6 +69,7 @@ impl BatchManager {
         batch_linger: Duration,
         _batch_max_size: u32,
         max_requests_per_batch: u32,
+        request_timeout: Duration,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let context = CancellationToken::new();
@@ -80,6 +83,7 @@ impl BatchManager {
             write_stream_manager,
             batch_linger,
             max_requests_per_batch,
+            request_timeout,
         ));
         BatchManager {
             context,
@@ -119,6 +123,7 @@ async fn start_batcher(
     write_stream_manager: Arc<WriteStreamManager>,
     batch_linger: Duration,
     max_requests_per_batch: u32,
+    request_timeout: Duration,
 ) {
     let mut buffer = Vec::new();
     let mut batch = batcher.create_batch(
@@ -127,6 +132,7 @@ async fn start_batcher(
         provider_manager.clone(),
         write_stream_manager.clone(),
         max_requests_per_batch,
+        request_timeout,
     );
     let mut interval = interval(batch_linger);
     loop {
@@ -140,7 +146,7 @@ async fn start_batcher(
                    continue
                 }
                 batch.flush().await;
-                batch = batcher.create_batch( shard_id, shard_manager.clone(), provider_manager.clone(), write_stream_manager.clone(), max_requests_per_batch);
+                batch = batcher.create_batch( shard_id, shard_manager.clone(), provider_manager.clone(), write_stream_manager.clone(), max_requests_per_batch, request_timeout);
             }
             size = rx.recv_many(&mut buffer, usize::MAX) => {
                 if size == 0 {
@@ -150,7 +156,7 @@ async fn start_batcher(
                 for operation  in buffer.drain(..) {
                     if !batch.can_add(&operation) {
                         batch.flush().await;
-                        batch = batcher.create_batch( shard_id, shard_manager.clone(), provider_manager.clone(), write_stream_manager.clone(), max_requests_per_batch);
+                        batch = batcher.create_batch( shard_id, shard_manager.clone(), provider_manager.clone(), write_stream_manager.clone(), max_requests_per_batch, request_timeout);
                         interval.reset();
                     }
                     batch.add(operation);
