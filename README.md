@@ -1,30 +1,29 @@
-# Liboxia
+# oxia-client-rust
 
 
 [![Crates.io][crates-badge]][crates-url]
 
-[crates-badge]: https://img.shields.io/crates/v/liboxia.svg
-[crates-url]: https://crates.io/crates/liboxia
+[crates-badge]: https://img.shields.io/crates/v/oxia-client.svg
+[crates-url]: https://crates.io/crates/oxia-client
 
-Liboxia is a Rust library designed for both native Rust applications and for integration with other languages via its C
-Foreign Function Interface (FFI).
-It serves as a client SDK for [Oxia](https://github.com/oxia-db/oxia), a distributed key-value store, enabling robust,
-asynchronous data operations.
+The native Rust client SDK for [Oxia](https://github.com/oxia-db/oxia), a distributed key-value store. Built on the
+Tokio asynchronous runtime, it offers an idiomatic and comprehensive API for managing data in Oxia, plus an optional C
+Foreign Function Interface (FFI) for integration with other languages.
 
-## Modules
+## Crates
 
-- **liboxia-native**: This is the core, high-performance Rust library of the client. Built on the Tokio asynchronous
-  runtime, it offers an idiomatic and comprehensive API for managing data in Oxia.
-- **liboxia-ffi**: This module provides a C Foreign Function Interface for liboxia-native, allowing its functionality to
-  be exposed to C/C++ applications. The FFI layer manages complex data conversions and memory handling, ensuring a safe
-  and efficient bridge between the Rust and C codebases.
+- **oxia-client**: The core, high-performance Rust client library (published to crates.io as `oxia-client`, imported as
+  `use oxia::...`). Built on the Tokio asynchronous runtime, it offers an idiomatic and comprehensive API for managing
+  data in Oxia.
+- **oxia-client-ffi**: A C Foreign Function Interface over `oxia-client`, exposing its functionality to C/C++
+  applications. The FFI layer manages data conversions and memory handling to bridge the Rust and C codebases.
 
 ## Getting Started
 
 Please check the examples directory for usage examples.
 
-- liboxia-native: [liboxia-native/examples](./liboxia-native/examples)
-- liboxia-ffi: [liboxia-ffi/examples](./liboxia-ffi/examples)
+- oxia-client: [oxia-client/examples](./oxia-client/examples)
+- oxia-client-ffi: [oxia-client-ffi/examples](./oxia-client-ffi/examples)
 
 ## Contributing
 

@@ -1,7 +1,7 @@
-use liboxia::client::{ListOption, PutOption, RangeScanOption};
-use liboxia::client_builder::OxiaClientBuilder;
-use liboxia::oxia::SecondaryIndex;
 use log::info;
+use oxia::client::{ListOption, PutOption, RangeScanOption};
+use oxia::client_builder::OxiaClientBuilder;
+use oxia::oxia::SecondaryIndex;
 use tracing::level_filters::LevelFilter;
 
 #[tokio::main]

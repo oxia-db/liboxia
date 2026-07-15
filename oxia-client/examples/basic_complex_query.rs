@@ -1,7 +1,7 @@
-use liboxia::client::{GetOption, PutOption};
-use liboxia::client_builder::OxiaClientBuilder;
-use liboxia::oxia::KeyComparisonType;
 use log::info;
+use oxia::client::{GetOption, PutOption};
+use oxia::client_builder::OxiaClientBuilder;
+use oxia::oxia::KeyComparisonType;
 use tracing::level_filters::LevelFilter;
 
 #[tokio::main]

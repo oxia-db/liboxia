@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "liboxia-native",
-    "liboxia-ffi"
+    "oxia-client",
+    "oxia-client-ffi"
 ]
 resolver = "2"
 
@@ -19,6 +19,6 @@ log = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tonic-build = "0.13.1"
-liboxia = { path = "liboxia-native" }
+oxia-client = { path = "oxia-client" }
 libc = "0.2"
 futures = "0.3"

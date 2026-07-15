@@ -1,16 +1,16 @@
 [package]
-name = "liboxia-ffi"
+name = "oxia-client-ffi"
 version = "0.0.2"
 edition = "2021"
 
 
 
 [lib]
-name = "liboxia_ffi"
+name = "oxia_client_ffi"
 crate-type = ["cdylib"]
 
 
 [dependencies]
-liboxia = { workspace = true }
+oxia-client = { workspace = true }
 tokio = { workspace = true }
 libc = { workspace = true }
