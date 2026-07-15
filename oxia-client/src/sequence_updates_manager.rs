@@ -1,16 +1,16 @@
 use crate::errors::OxiaError;
-use crate::oxia::GetSequenceUpdatesRequest;
+use crate::proto::GetSequenceUpdatesRequest;
 use crate::provider_manager::ProviderManager;
-use crate::retry::{retry_until_cancelled, RetryError};
+use crate::retry::{RetryError, retry_until_cancelled};
 use crate::shard_manager::ShardManager;
-use log::info;
 use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tonic::codegen::tokio_stream::StreamExt;
 use tonic::Request;
+use tonic::codegen::tokio_stream::StreamExt;
+use tracing::info;
 
 pub struct SequenceUpdatesManager {
     context: CancellationToken,

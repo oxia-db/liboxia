@@ -4,9 +4,8 @@ use std::slice;
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;
 
-use oxia::client::OxiaClient as NativeOxiaClient;
-use oxia::client_options::OxiaClientOptions;
-use oxia::errors::OxiaError;
+use oxia::OxiaClient as NativeOxiaClient;
+use oxia::OxiaError;
 
 static GLOBAL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
@@ -100,13 +99,13 @@ pub extern "C" fn oxia_client_new(
             .to_string()
     };
 
-    let native_options = OxiaClientOptions {
-        service_address,
-        namespace,
-        ..Default::default()
-    };
-
-    let res = rt.block_on(async { NativeOxiaClient::new(native_options).await });
+    let res = rt.block_on(async {
+        NativeOxiaClient::builder()
+            .service_address(service_address)
+            .namespace(namespace)
+            .build()
+            .await
+    });
 
     match res {
         Ok(client) => {
@@ -141,7 +140,7 @@ pub extern "C" fn oxia_client_put(
     let value = unsafe { slice::from_raw_parts(value, value_len).to_vec() };
     let result = rt.block_on(async {
         let rust_client = unsafe { &*client };
-        rust_client.0.put_with_options(key, value, vec![]).await
+        rust_client.0.put(key, value).await
     });
 
     match result {
@@ -169,7 +168,7 @@ pub extern "C" fn oxia_client_get(
     let key = unsafe { CStr::from_ptr(key).to_str().unwrap().to_string() };
     let result = rt.block_on(async {
         let rust_client = unsafe { &*client };
-        rust_client.0.get_with_options(key, vec![]).await
+        rust_client.0.get(key).await
     });
 
     match result {
@@ -177,9 +176,12 @@ pub extern "C" fn oxia_client_get(
             let key_str = CString::new(get_result.key).unwrap();
             let c_result = match get_result.value {
                 Some(value) => {
-                    let value_ptr = value.as_ptr() as *mut u8;
-                    let value_len = value.len();
-                    std::mem::forget(value); // Forget vec to prevent it from being freed
+                    // Copy out of the shared `Bytes` so the C side owns a plain
+                    // allocation it can free with oxia_get_result_free.
+                    let owned = value.to_vec();
+                    let value_len = owned.len();
+                    let value_ptr = owned.as_ptr() as *mut u8;
+                    std::mem::forget(owned);
                     COxiaGetResult {
                         key: key_str.into_raw(),
                         value: value_ptr,
@@ -208,7 +210,7 @@ pub extern "C" fn oxia_client_shutdown(client: *mut OxiaClient) -> COxiaError {
     let rt = get_runtime();
     let res = rt.block_on(async {
         let rust_client = unsafe { Box::from_raw(client) };
-        rust_client.0.shutdown().await
+        rust_client.0.close().await
     });
 
     match res {
@@ -276,9 +278,8 @@ pub extern "C" fn oxia_client_list(
     });
 
     match result {
-        Ok(list_result) => {
-            let c_keys: Vec<*mut c_char> = list_result
-                .keys
+        Ok(keys) => {
+            let c_keys: Vec<*mut c_char> = keys
                 .into_iter()
                 .map(|k| CString::new(k).unwrap().into_raw())
                 .collect();

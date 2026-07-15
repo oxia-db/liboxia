@@ -1,27 +1,29 @@
+//! Builder for configuring and creating an [`OxiaClient`].
+
 use crate::address::ensure_protocol;
 use crate::client::OxiaClient;
 use crate::client_options::OxiaClientOptions;
 use crate::errors::OxiaError;
 use std::time::Duration;
 
-/// Builder for creating an [`OxiaClient`] with custom configuration.
+/// Configures and creates an [`OxiaClient`].
 ///
-/// # Example
 /// ```no_run
-/// # async fn example() {
-/// use oxia::client_builder::OxiaClientBuilder;
+/// # async fn example() -> Result<(), oxia::OxiaError> {
+/// use oxia::OxiaClient;
 /// use std::time::Duration;
 ///
-/// let client = OxiaClientBuilder::new()
-///     .service_address("localhost:6648".to_string())
-///     .namespace("my-namespace".to_string())
+/// let client = OxiaClient::builder()
+///     .service_address("localhost:6648")
+///     .namespace("my-namespace")
 ///     .session_timeout(Duration::from_secs(30))
 ///     .build()
-///     .await
-///     .unwrap();
+///     .await?;
+/// # Ok(())
 /// # }
 /// ```
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless built"]
 pub struct OxiaClientBuilder {
     service_address: Option<String>,
     namespace: Option<String>,
@@ -35,52 +37,65 @@ pub struct OxiaClientBuilder {
 }
 
 impl OxiaClientBuilder {
+    /// Creates a builder with all options at their defaults.
     pub fn new() -> Self {
         OxiaClientBuilder::default()
     }
 
-    pub fn service_address(mut self, service_address: String) -> Self {
-        self.service_address = Some(ensure_protocol(service_address));
+    /// The address of the Oxia service, as `host:port` (default:
+    /// `127.0.0.1:6648`).
+    pub fn service_address(mut self, service_address: impl Into<String>) -> Self {
+        self.service_address = Some(ensure_protocol(service_address.into()));
         self
     }
 
-    pub fn namespace(mut self, namespace: String) -> Self {
-        self.namespace = Some(namespace);
+    /// The Oxia namespace all operations apply to (default: `"default"`).
+    pub fn namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.namespace = Some(namespace.into());
         self
     }
 
-    pub fn identity(mut self, identity: String) -> Self {
-        self.identity = Some(identity);
+    /// The client identity reported with ephemeral records (default: a random
+    /// UUID).
+    pub fn identity(mut self, identity: impl Into<String>) -> Self {
+        self.identity = Some(identity.into());
         self
     }
 
+    /// How long an incomplete batch may wait for more operations before being
+    /// sent (default: 5ms).
     pub fn batch_linger(mut self, batch_linger: Duration) -> Self {
         self.batch_linger = Some(batch_linger);
         self
     }
 
+    /// The maximum byte size of a batch (default: 128KiB).
     pub fn batch_max_size(mut self, batch_max_size: u32) -> Self {
         self.batch_max_size = Some(batch_max_size);
         self
     }
 
+    /// The maximum number of operations in a batch (default: 1000).
     pub fn max_requests_per_batch(mut self, max_requests_per_batch: u32) -> Self {
         self.max_requests_per_batch = Some(max_requests_per_batch);
         self
     }
 
+    /// The session timeout for ephemeral records (default: 15s). Ephemeral
+    /// records disappear if the client fails to heartbeat for this long.
     pub fn session_timeout(mut self, session_timeout: Duration) -> Self {
         self.session_timeout = Some(session_timeout);
         self
     }
 
-    /// Interval between session keep-alive heartbeats. Defaults to
-    /// `session_timeout / 10` when not set.
+    /// The interval between session keep-alive heartbeats (default:
+    /// `session_timeout / 10`).
     pub fn session_keep_alive(mut self, session_keep_alive: Duration) -> Self {
         self.session_keep_alive = Some(session_keep_alive);
         self
     }
 
+    /// The deadline applied to individual operations (default: 30s).
     pub fn request_timeout(mut self, request_timeout: Duration) -> Self {
         self.request_timeout = Some(request_timeout);
         self
@@ -120,6 +135,11 @@ impl OxiaClientBuilder {
         options
     }
 
+    /// Connects to the cluster and returns the client.
+    ///
+    /// Fails fast — within the request timeout — when the cluster is
+    /// unreachable, the namespace does not exist, or the first shard
+    /// assignments cannot be obtained.
     pub async fn build(self) -> Result<OxiaClient, OxiaError> {
         OxiaClient::new(self.assemble_options()).await
     }

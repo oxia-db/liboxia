@@ -1,7 +1,6 @@
-use log::info;
-use oxia::client::{GetSequenceUpdatesOption, PutOption};
-use oxia::client_builder::OxiaClientBuilder;
+use oxia::OxiaClient;
 use std::time::Duration;
+use tracing::info;
 use tracing::level_filters::LevelFilter;
 
 #[tokio::main]
@@ -15,20 +14,15 @@ async fn main() {
         .with_target(false)
         .init();
 
-    let client = OxiaClientBuilder::new().build().await.unwrap();
+    let client = OxiaClient::connect("localhost:6648").await.unwrap();
 
-    let partition_key = "my-partition".to_string();
-    let base_key = "seq/events".to_string();
+    let partition_key = "my-partition";
+    let base_key = "seq/events";
 
-    // Subscribe to sequence updates for the key with partition key option
-    let mut sequence_rx = client
-        .get_sequence_updates_with_options(
-            base_key.clone(),
-            vec![
-                GetSequenceUpdatesOption::PartitionKey(partition_key.clone()),
-                GetSequenceUpdatesOption::BufferSize(50),
-            ],
-        )
+    // Subscribe to sequence updates for the key.
+    let mut updates = client
+        .sequence_updates(base_key, partition_key)
+        .buffer_size(50)
         .await
         .unwrap();
     info!("Subscribed to sequence updates for key '{}'", base_key);
@@ -36,7 +30,7 @@ async fn main() {
     // Spawn a task to listen for sequence updates
     let listener = tokio::spawn(async move {
         let mut count = 0;
-        while let Some(highest_key) = sequence_rx.recv().await {
+        while let Some(highest_key) = updates.recv().await {
             info!("Sequence update: highest_sequence_key={:?}", highest_key);
             count += 1;
             if count >= 5 {
@@ -49,17 +43,13 @@ async fn main() {
     // Give the listener time to connect
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Put records with sequence key deltas - the server will assign sequential suffixes
+    // Put records with sequence key deltas - the server assigns sequential
+    // suffixes and returns the generated key.
     for i in 1..=5 {
         let result = client
-            .put_with_options(
-                base_key.clone(),
-                format!("event-{}", i).into_bytes(),
-                vec![
-                    PutOption::PartitionKey(partition_key.clone()),
-                    PutOption::SequenceKeyDelta(vec![1]),
-                ],
-            )
+            .put(base_key, format!("event-{i}"))
+            .partition_key(partition_key)
+            .sequence_key_deltas([1])
             .await
             .unwrap();
         info!("Put sequence event {}: generated key={:?}", i, result.key);
@@ -70,14 +60,11 @@ async fn main() {
 
     // Cleanup
     client
-        .delete_range_with_options(
-            "seq/".to_string(),
-            "seq/~".to_string(),
-            vec![oxia::client::DeleteRangeOption::PartitionKey(partition_key)],
-        )
+        .delete_range("seq/", "seq/~")
+        .partition_key(partition_key)
         .await
         .unwrap();
     info!("Cleaned up sequence keys.");
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }

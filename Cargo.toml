@@ -15,7 +15,7 @@ xxhash-rust = { version = "0.8.5", features = ["xxh3"] }
 uuid = { version = "1.7", features = ["v4"] }
 tokio-util = "0.7"
 arc-swap = "1.7"
-log = "0.4"
+bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tonic-build = "0.13.1"

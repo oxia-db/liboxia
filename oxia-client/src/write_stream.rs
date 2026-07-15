@@ -1,16 +1,16 @@
 use crate::errors::OxiaError;
-use crate::oxia::{WriteRequest, WriteResponse};
-use log::{info, warn};
+use crate::proto::{WriteRequest, WriteResponse};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::Receiver;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tonic::codegen::tokio_stream::StreamExt;
 use tonic::Streaming;
+use tonic::codegen::tokio_stream::StreamExt;
+use tracing::{info, warn};
 
 pub(crate) struct Inflight {
     pub(crate) future: oneshot::Sender<WriteResponse>,

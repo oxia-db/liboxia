@@ -1,7 +1,5 @@
-use log::info;
-use oxia::client::{ListOption, PutOption, RangeScanOption};
-use oxia::client_builder::OxiaClientBuilder;
-use oxia::oxia::SecondaryIndex;
+use oxia::OxiaClient;
+use tracing::info;
 use tracing::level_filters::LevelFilter;
 
 #[tokio::main]
@@ -15,98 +13,50 @@ async fn main() {
         .with_target(false)
         .init();
 
-    let client = OxiaClientBuilder::new().build().await.unwrap();
+    let client = OxiaClient::connect("localhost:6648").await.unwrap();
 
-    // Put records with secondary indexes
-    let put_result = client
-        .put_with_options(
-            "user/1".to_string(),
-            b"alice".to_vec(),
-            vec![PutOption::SecondaryIndexes(vec![SecondaryIndex {
-                index_name: "by-name".to_string(),
-                secondary_key: "alice".to_string(),
-            }])],
-        )
-        .await
-        .unwrap();
-    info!(
-        "Put user/1 with secondary index. version={:?}",
-        put_result.version
-    );
-
-    let put_result = client
-        .put_with_options(
-            "user/2".to_string(),
-            b"bob".to_vec(),
-            vec![PutOption::SecondaryIndexes(vec![SecondaryIndex {
-                index_name: "by-name".to_string(),
-                secondary_key: "bob".to_string(),
-            }])],
-        )
-        .await
-        .unwrap();
-    info!(
-        "Put user/2 with secondary index. version={:?}",
-        put_result.version
-    );
-
-    let put_result = client
-        .put_with_options(
-            "user/3".to_string(),
-            b"charlie".to_vec(),
-            vec![PutOption::SecondaryIndexes(vec![SecondaryIndex {
-                index_name: "by-name".to_string(),
-                secondary_key: "charlie".to_string(),
-            }])],
-        )
-        .await
-        .unwrap();
-    info!(
-        "Put user/3 with secondary index. version={:?}",
-        put_result.version
-    );
-
-    // List keys using the secondary index
-    let list_result = client
-        .list_with_options(
-            "a".to_string(),
-            "z".to_string(),
-            vec![ListOption::UseIndex("by-name".to_string())],
-        )
-        .await
-        .unwrap();
-    info!(
-        "List keys via secondary index 'by-name': {:?}",
-        list_result.keys
-    );
-
-    // Range scan using the secondary index
-    let range_scan_result = client
-        .range_scan_with_options(
-            "a".to_string(),
-            "z".to_string(),
-            vec![RangeScanOption::UseIndex("by-name".to_string())],
-        )
-        .await
-        .unwrap();
-    info!(
-        "Range scan via secondary index 'by-name': {} records",
-        range_scan_result.records.len()
-    );
-    for record in &range_scan_result.records {
+    // Put records, each also indexed by name in the "by-name" secondary index.
+    for (key, name) in [("user/1", "alice"), ("user/2", "bob"), ("user/3", "carol")] {
+        let put_result = client
+            .put(key, name)
+            .secondary_index("by-name", name)
+            .await
+            .unwrap();
         info!(
-            "  key={:?} value={:?}",
+            "Put {key} with secondary index by-name={name}. version={:?}",
+            put_result.version
+        );
+    }
+
+    // Query the secondary index with get.
+    let result = client.get("bob").use_index("by-name").await.unwrap();
+    info!(
+        "get('bob') via by-name => key={:?} value={:?}",
+        result.key,
+        result.value.as_ref().map(|v| String::from_utf8_lossy(v))
+    );
+
+    // List keys through the secondary index.
+    let keys = client.list("a", "z").use_index("by-name").await.unwrap();
+    info!("list('a'..'z') via by-name => {:?}", keys);
+
+    // Range-scan through the secondary index.
+    let records = client
+        .range_scan("a", "z")
+        .use_index("by-name")
+        .await
+        .unwrap();
+    for record in &records {
+        info!(
+            "scan via by-name => key={:?} value={:?}",
             record.key,
             record.value.as_ref().map(|v| String::from_utf8_lossy(v))
         );
     }
 
     // Cleanup
-    client
-        .delete_range("user/".to_string(), "user/~".to_string())
-        .await
-        .unwrap();
-    info!("Cleaned up all user records.");
+    client.delete_range("user/", "user/~").await.unwrap();
+    info!("Cleaned up all user/* records.");
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }

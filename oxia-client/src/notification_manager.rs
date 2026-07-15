@@ -1,19 +1,19 @@
-use crate::client::Notification;
 use crate::errors::OxiaError;
-use crate::oxia::NotificationsRequest;
+use crate::proto::NotificationsRequest;
 use crate::provider_manager::ProviderManager;
-use crate::retry::{retry_until_cancelled, RetryError};
+use crate::retry::{RetryError, retry_until_cancelled};
 use crate::shard_manager::ShardManager;
+use crate::types::Notification;
 use dashmap::DashMap;
-use log::info;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use task::JoinHandle;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::Sender;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 use tonic::codegen::tokio_stream::StreamExt;
+use tracing::{info, warn};
 
 struct NotificationListener {
     context: CancellationToken,
@@ -82,7 +82,7 @@ async fn start_notification_listener(
                 None => {
                     return Err(RetryError::transient(OxiaError::LeaderNotFound {
                         shard: shard_id,
-                    }))
+                    }));
                 }
                 Some(leader) => provider_manager
                     .get_provider(leader.service_address)
@@ -114,7 +114,11 @@ async fn start_notification_listener(
                             })?;
                             offset_ref.store(batch.offset, Ordering::Release);
                             for entry in batch.notifications {
-                                    if sender.send(entry.into()).await.is_err() {
+                                    let Some(notification) = Notification::from_proto(entry) else {
+                                        warn!("skipping unrecognized notification type");
+                                        continue;
+                                    };
+                                    if sender.send(notification).await.is_err() {
                                         // Receiver dropped, stop listening
                                         return Ok(());
                                     }
@@ -142,7 +146,7 @@ impl NotificationManager {
         let manager = Self {
             listener: DashMap::new(),
         };
-        for (shard_id, _) in shard_manager.get_shards_leader() {
+        for shard_id in shard_manager.get_shard_ids() {
             let shard_sender = sender.clone();
             let listener = NotificationListener::new(
                 shard_id,

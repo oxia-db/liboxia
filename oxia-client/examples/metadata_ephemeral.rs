@@ -1,6 +1,5 @@
-use log::info;
-use oxia::client::PutOption;
-use oxia::client_builder::OxiaClientBuilder;
+use oxia::OxiaClient;
+use tracing::info;
 use tracing::level_filters::LevelFilter;
 
 #[tokio::main]
@@ -14,26 +13,22 @@ async fn main() {
         .with_target(false)
         .init();
 
-    let client = OxiaClientBuilder::new().build().await.unwrap();
-    let key = String::from("key1");
-    let payload = "payload".to_string().into_bytes();
+    let client = OxiaClient::connect("localhost:6648").await.unwrap();
+    let payload = "payload";
 
     // put ephemeral record
-    let put_result = client
-        .put_with_options(key.clone(), payload.clone(), vec![PutOption::Ephemeral()])
-        .await
-        .unwrap();
+    let put_result = client.put("key1", payload).ephemeral().await.unwrap();
     info!(
         "put the ephemeral record. key {:?} value {:?} version {:?}",
         put_result.key, payload, put_result.version
     );
-    // close the client (this closes the session, which should delete ephemeral records)
-    client.shutdown().await.unwrap();
+    // close the client (this closes the session, which deletes ephemeral records)
+    client.close().await.unwrap();
 
     // create a new client and verify the ephemeral record is gone
-    let client2 = OxiaClientBuilder::new().build().await.unwrap();
-    let result = client2.get(key.clone()).await;
+    let client2 = OxiaClient::connect("localhost:6648").await.unwrap();
+    let result = client2.get("key1").await;
     info!("get the value again. error: {:?}", result.unwrap_err());
 
-    client2.shutdown().await.unwrap();
+    client2.close().await.unwrap();
 }

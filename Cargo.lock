@@ -1103,8 +1103,9 @@ name = "oxia-client"
 version = "0.0.2"
 dependencies = [
  "arc-swap",
+ "bytes",
  "dashmap",
- "log",
+ "futures",
  "prost",
  "testcontainers",
  "testcontainers-modules",

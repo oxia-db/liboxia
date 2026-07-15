@@ -1,7 +1,5 @@
-use log::info;
-use oxia::client::{GetOption, PutOption};
-use oxia::client_builder::OxiaClientBuilder;
-use oxia::oxia::KeyComparisonType;
+use oxia::{ComparisonType, OxiaClient};
+use tracing::info;
 use tracing::level_filters::LevelFilter;
 
 #[tokio::main]
@@ -15,20 +13,16 @@ async fn main() {
         .with_target(false)
         .init();
 
-    let client = OxiaClientBuilder::new().build().await.unwrap();
+    let client = OxiaClient::connect("localhost:6648").await.unwrap();
 
     // Put some records with keys we can query
-    let keys = vec!["key/a", "key/c", "key/e", "key/g", "key/i"];
-    for key in &keys {
-        client
-            .put(key.to_string(), format!("value-{}", key).into_bytes())
-            .await
-            .unwrap();
+    for key in ["key/a", "key/c", "key/e", "key/g", "key/i"] {
+        client.put(key, format!("value-{key}")).await.unwrap();
         info!("Put {:?}", key);
     }
 
     // EQUAL comparison (default) - exact match
-    let result = client.get("key/c".to_string()).await.unwrap();
+    let result = client.get("key/c").await.unwrap();
     info!(
         "EQUAL  get('key/c') => key={:?} value={:?}",
         result.key,
@@ -37,10 +31,8 @@ async fn main() {
 
     // FLOOR - highest key <= requested key
     let result = client
-        .get_with_options(
-            "key/d".to_string(),
-            vec![GetOption::ComparisonType(KeyComparisonType::Floor)],
-        )
+        .get("key/d")
+        .comparison(ComparisonType::Floor)
         .await
         .unwrap();
     info!(
@@ -50,10 +42,8 @@ async fn main() {
 
     // CEILING - lowest key >= requested key
     let result = client
-        .get_with_options(
-            "key/d".to_string(),
-            vec![GetOption::ComparisonType(KeyComparisonType::Ceiling)],
-        )
+        .get("key/d")
+        .comparison(ComparisonType::Ceiling)
         .await
         .unwrap();
     info!(
@@ -63,10 +53,8 @@ async fn main() {
 
     // LOWER - highest key strictly < requested key
     let result = client
-        .get_with_options(
-            "key/e".to_string(),
-            vec![GetOption::ComparisonType(KeyComparisonType::Lower)],
-        )
+        .get("key/e")
+        .comparison(ComparisonType::Lower)
         .await
         .unwrap();
     info!(
@@ -76,10 +64,8 @@ async fn main() {
 
     // HIGHER - lowest key strictly > requested key
     let result = client
-        .get_with_options(
-            "key/e".to_string(),
-            vec![GetOption::ComparisonType(KeyComparisonType::Higher)],
-        )
+        .get("key/e")
+        .comparison(ComparisonType::Higher)
         .await
         .unwrap();
     info!(
@@ -89,11 +75,8 @@ async fn main() {
 
     // Conditional put: only create if record does NOT exist
     let result = client
-        .put_with_options(
-            "key/new".to_string(),
-            b"new-value".to_vec(),
-            vec![PutOption::ExpectedRecordNotExists()],
-        )
+        .put("key/new", "new-value")
+        .expected_record_not_exists()
         .await;
     info!(
         "Create-only put for 'key/new' (should succeed): {:?}",
@@ -102,11 +85,8 @@ async fn main() {
 
     // Try again - should fail because it already exists
     let result = client
-        .put_with_options(
-            "key/new".to_string(),
-            b"new-value-2".to_vec(),
-            vec![PutOption::ExpectedRecordNotExists()],
-        )
+        .put("key/new", "new-value-2")
+        .expected_record_not_exists()
         .await;
     info!(
         "Create-only put for 'key/new' (should fail): {:?}",
@@ -114,11 +94,8 @@ async fn main() {
     );
 
     // Cleanup
-    client
-        .delete_range("key/".to_string(), "key/~".to_string())
-        .await
-        .unwrap();
+    client.delete_range("key/", "key/~").await.unwrap();
     info!("Cleaned up all key/* records.");
 
-    client.shutdown().await.unwrap();
+    client.close().await.unwrap();
 }

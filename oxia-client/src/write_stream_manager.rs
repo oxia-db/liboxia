@@ -1,15 +1,15 @@
 use crate::errors::OxiaError;
-use crate::oxia::{WriteRequest, WriteResponse};
+use crate::proto::{WriteRequest, WriteResponse};
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
 use crate::write_stream::WriteStream;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, OnceCell};
+use tokio::sync::{OnceCell, mpsc};
 use tokio::task::JoinSet;
-use tonic::codegen::tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::Request;
+use tonic::codegen::tokio_stream::wrappers::UnboundedReceiverStream;
 
 const WRITE_STREAM_HEADER_NAMESPACE: &str = "namespace";
 const WRITE_STREAM_HEADER_SHARD_ID: &str = "shard-id";
@@ -84,13 +84,14 @@ impl WriteStreamManager {
         Ok(Some(w_stream.get_defer_response().await.unwrap()?))
     }
 
-    pub async fn shutdown(self) -> Result<(), OxiaError> {
-        let streams = self.streams;
-
+    pub async fn close(&self) -> Result<(), OxiaError> {
+        let shards: Vec<i64> = self.streams.iter().map(|entry| *entry.key()).collect();
         let mut joiner = JoinSet::new();
-        for (_, stream_cell) in streams.into_iter() {
-            if let Some(stream) = stream_cell.into_inner() {
-                joiner.spawn(stream.shutdown());
+        for shard in shards {
+            if let Some((_, stream_cell)) = self.streams.remove(&shard) {
+                if let Some(stream) = stream_cell.into_inner() {
+                    joiner.spawn(stream.shutdown());
+                }
             }
         }
         while let Some(result) = joiner.join_next().await {

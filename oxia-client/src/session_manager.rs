@@ -1,19 +1,19 @@
 use crate::errors::OxiaError;
-use crate::oxia::{CloseSessionRequest, CreateSessionRequest, SessionHeartbeat};
+use crate::proto::{CloseSessionRequest, CreateSessionRequest, SessionHeartbeat};
 use crate::provider_manager::ProviderManager;
-use crate::retry::{retry_until_cancelled, RetryError};
+use crate::retry::{RetryError, retry_until_cancelled};
 use crate::shard_manager::ShardManager;
 use crate::status::CODE_SESSION_NOT_FOUND;
 use dashmap::DashMap;
-use log::{info, warn};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, OnceCell};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tonic::Request;
+use tracing::{info, warn};
 
 struct Inner {
     shard_id: i64,
@@ -247,11 +247,14 @@ impl SessionManager {
         Ok(session.inner.id)
     }
 
-    pub(crate) async fn shutdown(self) -> Result<(), OxiaError> {
+    pub(crate) async fn close(&self) -> Result<(), OxiaError> {
+        let shards: Vec<i64> = self.sessions.iter().map(|entry| *entry.key()).collect();
         let mut joiner = JoinSet::new();
-        for (_, session_cell) in self.sessions.into_iter() {
-            if let Some(session) = session_cell.into_inner() {
-                joiner.spawn(session.shutdown());
+        for shard in shards {
+            if let Some((_, session_cell)) = self.sessions.remove(&shard) {
+                if let Some(session) = session_cell.into_inner() {
+                    joiner.spawn(session.shutdown());
+                }
             }
         }
         while let Some(result) = joiner.join_next().await {

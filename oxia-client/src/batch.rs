@@ -1,45 +1,58 @@
+//! Accumulates pending operations for one shard and flushes them as a single
+//! batched request. Requests are moved (not cloned) into the outgoing batch;
+//! callbacks are kept and completed in order from the response.
+
 use crate::errors::OxiaError;
-use crate::operations::Operation;
-use crate::operations::ToProtobuf;
-use crate::operations::{
-    CompletableOperation, DeleteOperation, DeleteRangeOperation, GetOperation, PutOperation,
-};
-use crate::oxia::{ReadRequest, ReadResponse, WriteRequest};
+use crate::operations::{Operation, PendingDelete, PendingDeleteRange, PendingGet, PendingPut};
+use crate::proto::{ReadRequest, ReadResponse, WriteRequest};
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
 use crate::write_stream_manager::WriteStreamManager;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::oneshot;
 use tonic::codegen::tokio_stream::StreamExt;
-use tonic::{Request, Response, Streaming};
+use tonic::{Request, Streaming};
+use tracing::warn;
 
-pub enum Batch {
+pub(crate) enum Batch {
     Read(ReadBatch),
     Write(WriteBatch),
 }
 
 impl Batch {
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         match self {
-            Batch::Read(read_batch) => read_batch.is_empty(),
+            Batch::Read(read_batch) => read_batch.gets.is_empty(),
             Batch::Write(write_batch) => write_batch.is_empty(),
         }
     }
-    pub fn can_add(&self, operation: &Operation) -> bool {
+
+    pub(crate) fn can_add(&self, operation: &Operation) -> bool {
+        let _ = operation;
         match self {
-            Batch::Read(read_batch) => read_batch.can_add(operation),
-            Batch::Write(write_batch) => write_batch.can_add(operation),
+            Batch::Read(read_batch) => (read_batch.gets.len() as u32) < read_batch.max_requests,
+            Batch::Write(write_batch) => write_batch.total_count() < write_batch.max_requests,
         }
     }
 
-    pub fn add(&mut self, operation: Operation) {
-        match self {
-            Batch::Read(read_batch) => read_batch.add(operation),
-            Batch::Write(write_batch) => write_batch.add(operation),
+    /// Adds an operation. `Flush` markers are handled by the batcher loop and
+    /// must not reach here.
+    pub(crate) fn add(&mut self, operation: Operation) {
+        match (self, operation) {
+            (Batch::Read(read_batch), Operation::Get(get)) => read_batch.gets.push(get),
+            (Batch::Write(write_batch), Operation::Put(put)) => write_batch.puts.push(put),
+            (Batch::Write(write_batch), Operation::Delete(delete)) => {
+                write_batch.deletes.push(delete)
+            }
+            (Batch::Write(write_batch), Operation::DeleteRange(dr)) => {
+                write_batch.delete_ranges.push(dr)
+            }
+            _ => warn!("operation routed to the wrong batcher; dropping"),
         }
     }
 
-    pub async fn flush(&mut self) {
+    pub(crate) async fn flush(&mut self) {
         match self {
             Batch::Read(read_batch) => read_batch.flush().await,
             Batch::Write(write_batch) => write_batch.flush().await,
@@ -47,16 +60,51 @@ impl Batch {
     }
 }
 
+fn fail_all<Resp>(
+    callbacks: impl IntoIterator<Item = oneshot::Sender<Result<Resp, OxiaError>>>,
+    err: &OxiaError,
+) {
+    for callback in callbacks {
+        let _ = callback.send(Err(err.clone()));
+    }
+}
+
+/// Completes `callbacks` in order from `responses`; leftovers on either side
+/// indicate a server bug and fail with a decode error.
+fn complete_all<Resp>(
+    callbacks: impl IntoIterator<Item = oneshot::Sender<Result<Resp, OxiaError>>>,
+    responses: impl IntoIterator<Item = Resp>,
+    what: &str,
+) {
+    let mut responses = responses.into_iter();
+    for callback in callbacks {
+        match responses.next() {
+            Some(response) => {
+                let _ = callback.send(Ok(response));
+            }
+            None => {
+                let _ = callback.send(Err(OxiaError::Decode(format!(
+                    "missing {what} response from server"
+                ))));
+            }
+        }
+    }
+    if responses.next().is_some() {
+        warn!("server returned more {what} responses than requested");
+    }
+}
+
 pub(crate) struct ReadBatch {
-    get_inflight: Vec<GetOperation>,
+    gets: Vec<PendingGet>,
     shard_id: i64,
     shard_manager: Arc<ShardManager>,
     provider_manager: Arc<ProviderManager>,
     max_requests: u32,
     request_timeout: Duration,
 }
+
 impl ReadBatch {
-    pub fn new(
+    pub(crate) fn new(
         shard_id: i64,
         shard_manager: Arc<ShardManager>,
         provider_manager: Arc<ProviderManager>,
@@ -64,7 +112,7 @@ impl ReadBatch {
         request_timeout: Duration,
     ) -> Self {
         ReadBatch {
-            get_inflight: Vec::new(),
+            gets: Vec::new(),
             shard_id,
             shard_manager,
             provider_manager,
@@ -73,207 +121,143 @@ impl ReadBatch {
         }
     }
 
-    fn is_empty(&self) -> bool {
-        self.get_inflight.is_empty()
-    }
-
-    fn can_add(&self, _: &Operation) -> bool {
-        (self.get_inflight.len() as u32) < self.max_requests
-    }
-    fn add(&mut self, operation: Operation) {
-        if let Operation::Get(get) = operation {
-            self.get_inflight.push(get);
-        }
-    }
-
     async fn flush(&mut self) {
+        let (requests, callbacks): (Vec<_>, Vec<_>) =
+            self.gets.drain(..).map(|p| (p.request, p.callback)).unzip();
+
         let node = match self.shard_manager.get_leader(self.shard_id) {
             Some(node) => node,
             None => {
-                self.failure_inflight(OxiaError::LeaderNotFound {
-                    shard: self.shard_id,
-                });
+                fail_all(
+                    callbacks,
+                    &OxiaError::LeaderNotFound {
+                        shard: self.shard_id,
+                    },
+                );
                 return;
             }
         };
-        match self
+        let mut provider = match self
             .provider_manager
             .get_provider(node.service_address)
             .await
         {
-            Ok(mut provider) => {
-                let mut request = ReadRequest {
-                    shard: Some(self.shard_id),
-                    gets: vec![],
-                };
-                for operation in self.get_inflight.iter() {
-                    request.gets.push(operation.to_proto());
-                }
-                let mut request = Request::new(request);
-                request.set_timeout(self.request_timeout);
-                match provider.read(request).await {
-                    Ok(response) => {
-                        if let Err(err) = self.receive_all(response).await {
-                            self.failure_inflight(err)
-                        }
-                    }
-                    Err(err) => self.failure_inflight(OxiaError::from(err)),
-                }
+            Ok(provider) => provider,
+            Err(err) => {
+                fail_all(callbacks, &err);
+                return;
             }
-            Err(err) => self.failure_inflight(err),
-        }
-    }
+        };
 
-    async fn receive_all(
-        &mut self,
-        response: Response<Streaming<ReadResponse>>,
-    ) -> Result<(), OxiaError> {
-        let mut streaming = response.into_inner();
-        let mut inflight_iter = self.get_inflight.drain(..);
-        loop {
-            let next = streaming.next().await;
-            if next.is_none() {
-                // stream is closed
-                break;
-            }
-            let read_response = next.unwrap().map_err(OxiaError::from)?;
-            for get_response in read_response.gets {
-                let next_inflight = inflight_iter.next();
-                if next_inflight.is_none() {
-                    return Err(OxiaError::Decode(
-                        "server returned more get responses than requested".to_string(),
-                    ));
-                }
-                let mut operation = next_inflight.unwrap();
-                operation.complete(get_response);
-            }
-        }
-        Ok(())
-    }
-
-    fn failure_inflight(&mut self, err: OxiaError) {
-        for mut operation in self.get_inflight.drain(..) {
-            operation.complete_exception(err.clone())
+        let mut request = Request::new(ReadRequest {
+            shard: Some(self.shard_id),
+            gets: requests,
+        });
+        request.set_timeout(self.request_timeout);
+        match provider.read(request).await {
+            Ok(response) => receive_all(response.into_inner(), callbacks).await,
+            Err(status) => fail_all(callbacks, &OxiaError::from(status)),
         }
     }
 }
 
+async fn receive_all(
+    mut streaming: Streaming<ReadResponse>,
+    callbacks: Vec<oneshot::Sender<Result<crate::proto::GetResponse, OxiaError>>>,
+) {
+    let mut callbacks = callbacks.into_iter();
+    while let Some(next) = streaming.next().await {
+        match next {
+            Ok(read_response) => {
+                for get_response in read_response.gets {
+                    match callbacks.next() {
+                        Some(callback) => {
+                            let _ = callback.send(Ok(get_response));
+                        }
+                        None => {
+                            warn!("server returned more get responses than requested");
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(status) => {
+                fail_all(callbacks, &OxiaError::from(status));
+                return;
+            }
+        }
+    }
+    // The stream ended before every get was answered.
+    fail_all(
+        callbacks,
+        &OxiaError::Decode("missing get response from server".to_string()),
+    );
+}
+
 pub(crate) struct WriteBatch {
     shard_id: i64,
-    put_inflight: Vec<PutOperation>,
-    delete_inflight: Vec<DeleteOperation>,
-    delete_range_inflight: Vec<DeleteRangeOperation>,
+    puts: Vec<PendingPut>,
+    deletes: Vec<PendingDelete>,
+    delete_ranges: Vec<PendingDeleteRange>,
     write_stream_manager: Arc<WriteStreamManager>,
     max_requests: u32,
 }
 
 impl WriteBatch {
-    pub fn new(
+    pub(crate) fn new(
         shard_id: i64,
         write_stream_manager: Arc<WriteStreamManager>,
         max_requests: u32,
     ) -> Self {
         WriteBatch {
             shard_id,
-            put_inflight: Vec::new(),
-            delete_inflight: Vec::new(),
-            delete_range_inflight: Vec::new(),
+            puts: Vec::new(),
+            deletes: Vec::new(),
+            delete_ranges: Vec::new(),
             write_stream_manager,
             max_requests,
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.put_inflight.is_empty()
-            && self.delete_inflight.is_empty()
-            && self.delete_range_inflight.is_empty()
+        self.puts.is_empty() && self.deletes.is_empty() && self.delete_ranges.is_empty()
     }
 
     fn total_count(&self) -> u32 {
-        (self.put_inflight.len() + self.delete_inflight.len() + self.delete_range_inflight.len())
-            as u32
-    }
-
-    fn can_add(&self, _: &Operation) -> bool {
-        self.total_count() < self.max_requests
-    }
-
-    fn add(&mut self, operation: Operation) {
-        match operation {
-            Operation::Put(put) => {
-                self.put_inflight.push(put);
-            }
-            Operation::Delete(delete) => {
-                self.delete_inflight.push(delete);
-            }
-            Operation::DeleteRange(delete_range) => {
-                self.delete_range_inflight.push(delete_range);
-            }
-            Operation::Get(_) => {}
-        }
+        (self.puts.len() + self.deletes.len() + self.delete_ranges.len()) as u32
     }
 
     async fn flush(&mut self) {
-        let mut write_request = WriteRequest {
+        let (put_reqs, put_cbs): (Vec<_>, Vec<_>) =
+            self.puts.drain(..).map(|p| (p.request, p.callback)).unzip();
+        let (delete_reqs, delete_cbs): (Vec<_>, Vec<_>) = self
+            .deletes
+            .drain(..)
+            .map(|p| (p.request, p.callback))
+            .unzip();
+        let (dr_reqs, dr_cbs): (Vec<_>, Vec<_>) = self
+            .delete_ranges
+            .drain(..)
+            .map(|p| (p.request, p.callback))
+            .unzip();
+
+        let request = WriteRequest {
             shard: Some(self.shard_id),
-            puts: vec![],
-            deletes: vec![],
-            delete_ranges: vec![],
+            puts: put_reqs,
+            deletes: delete_reqs,
+            delete_ranges: dr_reqs,
         };
-        for operation in self.put_inflight.iter() {
-            write_request.puts.push(operation.to_proto());
-        }
-        for operation in self.delete_inflight.iter() {
-            write_request.deletes.push(operation.to_proto());
-        }
-        for operation in self.delete_range_inflight.iter() {
-            write_request.delete_ranges.push(operation.to_proto());
-        }
-        match self.write_stream_manager.write(write_request).await {
+        match self.write_stream_manager.write(request).await {
             Ok(response) => {
-                let mut put_responses = response.puts.into_iter();
-                for mut operation in self.put_inflight.drain(..) {
-                    match put_responses.next() {
-                        Some(put_response) => operation.complete(put_response),
-                        None => operation.complete_exception(OxiaError::Decode(
-                            "missing put response from server".to_string(),
-                        )),
-                    }
-                }
-                let mut delete_responses = response.deletes.into_iter();
-                for mut operation in self.delete_inflight.drain(..) {
-                    match delete_responses.next() {
-                        Some(delete_response) => operation.complete(delete_response),
-                        None => operation.complete_exception(OxiaError::Decode(
-                            "missing delete response from server".to_string(),
-                        )),
-                    }
-                }
-                let mut delete_range_responses = response.delete_ranges.into_iter();
-                for mut operation in self.delete_range_inflight.drain(..) {
-                    match delete_range_responses.next() {
-                        Some(delete_range_response) => operation.complete(delete_range_response),
-                        None => operation.complete_exception(OxiaError::Decode(
-                            "missing delete_range response from server".to_string(),
-                        )),
-                    }
-                }
+                complete_all(put_cbs, response.puts, "put");
+                complete_all(delete_cbs, response.deletes, "delete");
+                complete_all(dr_cbs, response.delete_ranges, "delete_range");
             }
             Err(err) => {
-                self.failure_inflight(err);
+                fail_all(put_cbs, &err);
+                fail_all(delete_cbs, &err);
+                fail_all(dr_cbs, &err);
             }
-        }
-    }
-
-    fn failure_inflight(&mut self, err: OxiaError) {
-        for mut operation in self.put_inflight.drain(..) {
-            operation.complete_exception(err.clone())
-        }
-        for mut operation in self.delete_inflight.drain(..) {
-            operation.complete_exception(err.clone())
-        }
-        for mut operation in self.delete_range_inflight.drain(..) {
-            operation.complete_exception(err.clone())
         }
     }
 }
