@@ -9,7 +9,7 @@ use std::time::Duration;
 /// # Example
 /// ```no_run
 /// # async fn example() {
-/// use liboxia::client_builder::OxiaClientBuilder;
+/// use oxia::client_builder::OxiaClientBuilder;
 /// use std::time::Duration;
 ///
 /// let client = OxiaClientBuilder::new()

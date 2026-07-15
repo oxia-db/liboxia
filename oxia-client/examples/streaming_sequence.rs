@@ -1,6 +1,6 @@
-use liboxia::client::{GetSequenceUpdatesOption, PutOption};
-use liboxia::client_builder::OxiaClientBuilder;
 use log::info;
+use oxia::client::{GetSequenceUpdatesOption, PutOption};
+use oxia::client_builder::OxiaClientBuilder;
 use std::time::Duration;
 use tracing::level_filters::LevelFilter;
 
@@ -73,9 +73,7 @@ async fn main() {
         .delete_range_with_options(
             "seq/".to_string(),
             "seq/~".to_string(),
-            vec![liboxia::client::DeleteRangeOption::PartitionKey(
-                partition_key,
-            )],
+            vec![oxia::client::DeleteRangeOption::PartitionKey(partition_key)],
         )
         .await
         .unwrap();

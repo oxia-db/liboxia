@@ -4,9 +4,9 @@ use std::slice;
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;
 
-use liboxia::client::OxiaClient as LibOxiaClient;
-use liboxia::client_options::OxiaClientOptions;
-use liboxia::errors::OxiaError;
+use oxia::client::OxiaClient as NativeOxiaClient;
+use oxia::client_options::OxiaClientOptions;
+use oxia::errors::OxiaError;
 
 static GLOBAL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
@@ -19,7 +19,7 @@ fn get_runtime() -> &'static Runtime {
     })
 }
 
-pub struct OxiaClient(Box<LibOxiaClient>);
+pub struct OxiaClient(Box<NativeOxiaClient>);
 
 #[repr(C)]
 pub struct COxiaClientOptions {
@@ -103,7 +103,7 @@ pub extern "C" fn oxia_client_new(
         ..Default::default()
     };
 
-    let res = rt.block_on(async { LibOxiaClient::new(native_options).await });
+    let res = rt.block_on(async { NativeOxiaClient::new(native_options).await });
 
     match res {
         Ok(client) => {

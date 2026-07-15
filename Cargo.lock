@@ -975,37 +975,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "58f929b4d672ea937a23a1ab494143d968337a5f47e56d0815df1e0890ddf174"
 
 [[package]]
-name = "liboxia"
-version = "0.0.2"
-dependencies = [
- "backoff",
- "dashmap",
- "log",
- "prost",
- "testcontainers",
- "testcontainers-modules",
- "thiserror",
- "tokio",
- "tokio-test",
- "tokio-util",
- "tonic",
- "tonic-build",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "xxhash-rust",
-]
-
-[[package]]
-name = "liboxia-ffi"
-version = "0.0.2"
-dependencies = [
- "libc",
- "liboxia",
- "tokio",
-]
-
-[[package]]
 name = "libredox"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1142,6 +1111,37 @@ name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
+name = "oxia-client"
+version = "0.0.2"
+dependencies = [
+ "backoff",
+ "dashmap",
+ "log",
+ "prost",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror",
+ "tokio",
+ "tokio-test",
+ "tokio-util",
+ "tonic",
+ "tonic-build",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "oxia-client-ffi"
+version = "0.0.2"
+dependencies = [
+ "libc",
+ "oxia-client",
+ "tokio",
+]
 
 [[package]]
 name = "parking_lot_core"

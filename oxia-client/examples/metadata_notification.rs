@@ -1,6 +1,6 @@
-use liboxia::client::Notification;
-use liboxia::client_builder::OxiaClientBuilder;
 use log::info;
+use oxia::client::Notification;
+use oxia::client_builder::OxiaClientBuilder;
 use std::time::Duration;
 use tracing::level_filters::LevelFilter;
 

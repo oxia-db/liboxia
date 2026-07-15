@@ -1,10 +1,10 @@
-use liboxia::client::{
+use oxia::client::{
     DeleteOption, DeleteRangeOption, GetOption, KeyCreated, KeyDeleted, KeyModified, ListOption,
     Notification, PutOption, RangeScanOption,
 };
-use liboxia::client_builder::OxiaClientBuilder;
-use liboxia::errors::OxiaError;
-use liboxia::oxia::{KeyComparisonType, SecondaryIndex};
+use oxia::client_builder::OxiaClientBuilder;
+use oxia::errors::OxiaError;
+use oxia::oxia::{KeyComparisonType, SecondaryIndex};
 use std::time::Duration;
 use testcontainers::core::ports::ContainerPort;
 use testcontainers::core::wait::WaitFor;
@@ -36,7 +36,7 @@ async fn start_oxia() -> (ContainerAsync<GenericImage>, String) {
     (container, address)
 }
 
-async fn new_client(address: &str) -> liboxia::client::OxiaClient {
+async fn new_client(address: &str) -> oxia::client::OxiaClient {
     OxiaClientBuilder::new()
         .service_address(address.to_string())
         .request_timeout(Duration::from_secs(10))
@@ -1130,9 +1130,7 @@ async fn test_notifications_with_buffer_size() {
     let client = new_client(&address).await;
 
     let mut notification_rx = client
-        .get_notifications_with_options(vec![liboxia::client::GetNotificationOption::BufferSize(
-            10,
-        )])
+        .get_notifications_with_options(vec![oxia::client::GetNotificationOption::BufferSize(10)])
         .await
         .unwrap();
 

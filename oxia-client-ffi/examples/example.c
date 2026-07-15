@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../liboxia_ffi.h"
+#include "../oxia_client_ffi.h"
 
 int main() {
     printf("Initializing Oxia client...\n");

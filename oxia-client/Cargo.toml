@@ -1,12 +1,15 @@
 [package]
-name = "liboxia"
+name = "oxia-client"
 version = "0.0.2"
 edition = "2021"
 
-description = "Liboxia is a Rust library designed for both native Rust applications and for integration with other languages via its C Foreign Function Interface (FFI). It serves as a client SDK for Oxia, a distributed key-value store, enabling robust, asynchronous data operations."
+description = "Native Rust client SDK for Oxia, a distributed key-value store. Provides an idiomatic, asynchronous API built on Tokio."
 license = "Apache-2.0"
-repository = "https://github.com/oxia-db/liboxia"
-homepage = "https://github.com/oxia-db/liboxia"
+repository = "https://github.com/oxia-db/oxia-client-rust"
+homepage = "https://github.com/oxia-db/oxia-client-rust"
+
+[lib]
+name = "oxia"
 
 [dependencies]
 backoff = { workspace = true }
