@@ -45,35 +45,38 @@ pub struct COxiaGetResult {
 #[derive(Debug, PartialEq)]
 pub enum COxiaError {
     Ok = 0,
-    TransportError = 1,
-    GrpcStatus = 2,
-    UnexpectedStatus = 3,
-    ShardLeaderNotFound = 4,
-    KeyLeaderNotFound = 5,
-    KeyNotFound = 6,
-    UnexpectedVersionId = 7,
-    SessionDoesNotExist = 8,
-    InternalRetryable = 9,
-    Cancelled = 10,
-    IllegalArgument = 11,
-    RequestTimeout = 12,
+    KeyNotFound = 1,
+    UnexpectedVersionId = 2,
+    SessionExpired = 3,
+    RequestTooLarge = 4,
+    InvalidArgument = 5,
+    LeaderNotFound = 6,
+    NoShardForKey = 7,
+    Disconnected = 8,
+    Timeout = 9,
+    Grpc = 10,
+    Decode = 11,
+    Closed = 12,
+    Other = 13,
 }
 
 impl From<OxiaError> for COxiaError {
     fn from(error: OxiaError) -> Self {
         match error {
-            OxiaError::Transport(_) => COxiaError::TransportError,
-            OxiaError::GrpcStatus(_) => COxiaError::GrpcStatus,
-            OxiaError::UnexpectedStatus(_) => COxiaError::UnexpectedStatus,
-            OxiaError::ShardLeaderNotFound(_) => COxiaError::ShardLeaderNotFound,
-            OxiaError::KeyLeaderNotFound(_) => COxiaError::KeyLeaderNotFound,
-            OxiaError::KeyNotFound() => COxiaError::KeyNotFound,
-            OxiaError::UnexpectedVersionId() => COxiaError::UnexpectedVersionId,
-            OxiaError::SessionDoesNotExist() => COxiaError::SessionDoesNotExist,
-            OxiaError::InternalRetryable() => COxiaError::InternalRetryable,
-            OxiaError::Cancelled() => COxiaError::Cancelled,
-            OxiaError::IllegalArgument(_) => COxiaError::IllegalArgument,
-            OxiaError::RequestTimeout() => COxiaError::RequestTimeout,
+            OxiaError::KeyNotFound => COxiaError::KeyNotFound,
+            OxiaError::UnexpectedVersionId => COxiaError::UnexpectedVersionId,
+            OxiaError::SessionExpired => COxiaError::SessionExpired,
+            OxiaError::RequestTooLarge => COxiaError::RequestTooLarge,
+            OxiaError::InvalidArgument(_) => COxiaError::InvalidArgument,
+            OxiaError::LeaderNotFound { .. } => COxiaError::LeaderNotFound,
+            OxiaError::NoShardForKey { .. } => COxiaError::NoShardForKey,
+            OxiaError::Disconnected(_) => COxiaError::Disconnected,
+            OxiaError::Timeout => COxiaError::Timeout,
+            OxiaError::Grpc { .. } => COxiaError::Grpc,
+            OxiaError::Decode(_) => COxiaError::Decode,
+            OxiaError::Closed => COxiaError::Closed,
+            // `OxiaError` is #[non_exhaustive]; map any future variant here.
+            _ => COxiaError::Other,
         }
     }
 }

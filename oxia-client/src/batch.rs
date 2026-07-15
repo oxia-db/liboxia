@@ -1,5 +1,4 @@
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::UnexpectedStatus;
 use crate::operations::Operation;
 use crate::operations::ToProtobuf;
 use crate::operations::{
@@ -87,7 +86,9 @@ impl ReadBatch {
         let node = match self.shard_manager.get_leader(self.shard_id) {
             Some(node) => node,
             None => {
-                self.failure_inflight(OxiaError::ShardLeaderNotFound(self.shard_id));
+                self.failure_inflight(OxiaError::LeaderNotFound {
+                    shard: self.shard_id,
+                });
                 return;
             }
         };
@@ -110,7 +111,7 @@ impl ReadBatch {
                             self.failure_inflight(err)
                         }
                     }
-                    Err(err) => self.failure_inflight(UnexpectedStatus(err.to_string())),
+                    Err(err) => self.failure_inflight(OxiaError::from(err)),
                 }
             }
             Err(err) => self.failure_inflight(err),
@@ -129,14 +130,12 @@ impl ReadBatch {
                 // stream is closed
                 break;
             }
-            let read_response = next
-                .unwrap()
-                .map_err(|err| UnexpectedStatus(err.to_string()))?;
+            let read_response = next.unwrap().map_err(OxiaError::from)?;
             for get_response in read_response.gets {
                 let next_inflight = inflight_iter.next();
                 if next_inflight.is_none() {
-                    return Err(UnexpectedStatus(
-                        "bug! unexpected inflight response".to_string(),
+                    return Err(OxiaError::Decode(
+                        "server returned more get responses than requested".to_string(),
                     ));
                 }
                 let mut operation = next_inflight.unwrap();
@@ -230,7 +229,7 @@ impl WriteBatch {
                 for mut operation in self.put_inflight.drain(..) {
                     match put_responses.next() {
                         Some(put_response) => operation.complete(put_response),
-                        None => operation.complete_exception(UnexpectedStatus(
+                        None => operation.complete_exception(OxiaError::Decode(
                             "missing put response from server".to_string(),
                         )),
                     }
@@ -239,7 +238,7 @@ impl WriteBatch {
                 for mut operation in self.delete_inflight.drain(..) {
                     match delete_responses.next() {
                         Some(delete_response) => operation.complete(delete_response),
-                        None => operation.complete_exception(UnexpectedStatus(
+                        None => operation.complete_exception(OxiaError::Decode(
                             "missing delete response from server".to_string(),
                         )),
                     }
@@ -248,7 +247,7 @@ impl WriteBatch {
                 for mut operation in self.delete_range_inflight.drain(..) {
                     match delete_range_responses.next() {
                         Some(delete_range_response) => operation.complete(delete_range_response),
-                        None => operation.complete_exception(UnexpectedStatus(
+                        None => operation.complete_exception(OxiaError::Decode(
                             "missing delete_range response from server".to_string(),
                         )),
                     }

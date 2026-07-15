@@ -1,40 +1,174 @@
 use thiserror::Error;
 
+/// Errors returned by the Oxia client.
+///
+/// The variants fall into three groups:
+/// - **Semantic results** callers commonly match on ([`KeyNotFound`],
+///   [`UnexpectedVersionId`], [`SessionExpired`], [`RequestTooLarge`],
+///   [`InvalidArgument`]). These are never retryable.
+/// - **Transient failures** that the client's background loops (and, in a later
+///   phase, its operation-level retries) may retry: [`LeaderNotFound`],
+///   [`NoShardForKey`], [`Disconnected`], and some [`Grpc`] codes. See
+///   [`OxiaError::is_retryable`].
+/// - **Terminal failures**: [`Timeout`], [`Decode`], [`Closed`], and the
+///   remaining [`Grpc`] codes.
+///
+/// [`KeyNotFound`]: OxiaError::KeyNotFound
+/// [`UnexpectedVersionId`]: OxiaError::UnexpectedVersionId
+/// [`SessionExpired`]: OxiaError::SessionExpired
+/// [`RequestTooLarge`]: OxiaError::RequestTooLarge
+/// [`InvalidArgument`]: OxiaError::InvalidArgument
+/// [`LeaderNotFound`]: OxiaError::LeaderNotFound
+/// [`NoShardForKey`]: OxiaError::NoShardForKey
+/// [`Disconnected`]: OxiaError::Disconnected
+/// [`Grpc`]: OxiaError::Grpc
+/// [`Timeout`]: OxiaError::Timeout
+/// [`Decode`]: OxiaError::Decode
+/// [`Closed`]: OxiaError::Closed
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum OxiaError {
-    #[error("unexpected transport error: {0}")]
-    Transport(String),
-
-    #[error("unexpected grpc status: {0}")]
-    GrpcStatus(#[from] tonic::Status),
-
-    #[error("unexpected status: {0}")]
-    UnexpectedStatus(String),
-
-    #[error("shard leader not found.  shard={0}")]
-    ShardLeaderNotFound(i64),
-
-    #[error("key leader not found.  key={0}")]
-    KeyLeaderNotFound(String),
-
+    /// The requested key does not exist.
     #[error("key not found")]
-    KeyNotFound(),
+    KeyNotFound,
 
+    /// A conditional operation failed because the stored version did not match
+    /// the expected one.
     #[error("unexpected version id")]
-    UnexpectedVersionId(),
+    UnexpectedVersionId,
 
-    #[error("session does not exist")]
-    SessionDoesNotExist(),
+    /// The session backing an ephemeral record has expired or been closed.
+    #[error("session no longer exists")]
+    SessionExpired,
 
-    #[error("retryable")]
-    InternalRetryable(),
+    /// A single request, or a batch that cannot be split further, exceeds the
+    /// server's maximum message size.
+    #[error("request is too large")]
+    RequestTooLarge,
 
-    #[error("the operation has been cancelled")]
-    Cancelled(),
+    /// An option or argument passed to an operation was invalid.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
 
-    #[error("illegal argument: {0}")]
-    IllegalArgument(String),
+    /// No leader is currently available for the shard (e.g. a leader election is
+    /// in progress). Retryable.
+    #[error("no leader available for shard {shard}")]
+    LeaderNotFound { shard: i64 },
 
-    #[error("request timeout")]
-    RequestTimeout(),
+    /// No shard currently owns the key, because shard assignments have not been
+    /// loaded yet or are momentarily incomplete. Retryable.
+    #[error("no shard owns key {key:?} (assignments not ready)")]
+    NoShardForKey { key: String },
+
+    /// The connection to a server was lost or could not be established, or an
+    /// in-flight request's worker went away. Retryable.
+    #[error("disconnected: {0}")]
+    Disconnected(String),
+
+    /// An operation did not complete before its deadline.
+    #[error("request timed out")]
+    Timeout,
+
+    /// The server returned a gRPC status. Whether it is retryable depends on the
+    /// code (see [`OxiaError::is_retryable`]).
+    #[error("grpc status {code:?}: {message}")]
+    Grpc {
+        /// The gRPC status code.
+        code: tonic::Code,
+        /// The gRPC status message.
+        message: String,
+    },
+
+    /// A server response could not be decoded — a required field was missing, or
+    /// the response did not match the request. Indicates a protocol mismatch or
+    /// a server bug.
+    #[error("failed to decode server response: {0}")]
+    Decode(String),
+
+    /// The client has been shut down and can no longer be used.
+    #[error("client is closed")]
+    Closed,
+}
+
+impl OxiaError {
+    /// Whether retrying the operation that produced this error might succeed.
+    ///
+    /// Mirrors the retryable set of the reference Go client: connection loss,
+    /// missing shard leaders / assignments, and the `UNAVAILABLE` / `ABORTED`
+    /// gRPC codes. Semantic results (e.g. [`KeyNotFound`](OxiaError::KeyNotFound))
+    /// and terminal failures are not retryable.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            OxiaError::LeaderNotFound { .. }
+            | OxiaError::NoShardForKey { .. }
+            | OxiaError::Disconnected(_) => true,
+            OxiaError::Grpc { code, .. } => {
+                matches!(code, tonic::Code::Unavailable | tonic::Code::Aborted)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl From<tonic::Status> for OxiaError {
+    fn from(status: tonic::Status) -> Self {
+        OxiaError::Grpc {
+            code: status.code(),
+            message: status.message().to_string(),
+        }
+    }
+}
+
+impl From<tonic::transport::Error> for OxiaError {
+    fn from(err: tonic::transport::Error) -> Self {
+        OxiaError::Disconnected(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retryable_classification() {
+        let msg = String::new();
+        assert!(OxiaError::LeaderNotFound { shard: 1 }.is_retryable());
+        assert!(OxiaError::NoShardForKey { key: "k".into() }.is_retryable());
+        assert!(OxiaError::Disconnected("x".into()).is_retryable());
+        assert!(OxiaError::Grpc {
+            code: tonic::Code::Unavailable,
+            message: msg.clone(),
+        }
+        .is_retryable());
+        assert!(OxiaError::Grpc {
+            code: tonic::Code::Aborted,
+            message: msg.clone(),
+        }
+        .is_retryable());
+
+        assert!(!OxiaError::KeyNotFound.is_retryable());
+        assert!(!OxiaError::UnexpectedVersionId.is_retryable());
+        assert!(!OxiaError::SessionExpired.is_retryable());
+        assert!(!OxiaError::RequestTooLarge.is_retryable());
+        assert!(!OxiaError::Timeout.is_retryable());
+        assert!(!OxiaError::Closed.is_retryable());
+        assert!(!OxiaError::Grpc {
+            code: tonic::Code::NotFound,
+            message: msg,
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn from_tonic_status_maps_to_grpc() {
+        let err = OxiaError::from(tonic::Status::unavailable("down"));
+        assert!(matches!(
+            err,
+            OxiaError::Grpc {
+                code: tonic::Code::Unavailable,
+                ..
+            }
+        ));
+        assert!(err.is_retryable());
+    }
 }

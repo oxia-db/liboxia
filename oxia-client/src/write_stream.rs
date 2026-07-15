@@ -1,5 +1,4 @@
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::UnexpectedStatus;
 use crate::oxia::{WriteRequest, WriteResponse};
 use log::{info, warn};
 use std::collections::VecDeque;
@@ -45,7 +44,9 @@ impl WriteStream {
     pub(crate) async fn send_defer(&self, request: WriteRequest) -> Result<(), OxiaError> {
         let mut inner_guard = self.inner.lock().await;
         if !inner_guard.alive {
-            return Err(UnexpectedStatus("write stream is closed".to_string()));
+            return Err(OxiaError::Disconnected(
+                "write stream is closed".to_string(),
+            ));
         }
         let (tx, rx) = oneshot::channel();
         let inflight = Inflight { future: tx };
@@ -53,7 +54,7 @@ impl WriteStream {
         if let Err(err) = inner_guard.tx.send(request) {
             inner_guard.alive = false;
             inner_guard.fail_inflight();
-            return Err(UnexpectedStatus(err.to_string()));
+            return Err(OxiaError::Disconnected(err.to_string()));
         }
         drop(inner_guard);
         let mut guard = self.defer_response.lock().await;
@@ -68,7 +69,9 @@ impl WriteStream {
     pub(crate) async fn send(&self, request: WriteRequest) -> Result<WriteResponse, OxiaError> {
         let mut inner_guard = self.inner.lock().await;
         if !inner_guard.alive {
-            return Err(UnexpectedStatus("write stream is closed".to_string()));
+            return Err(OxiaError::Disconnected(
+                "write stream is closed".to_string(),
+            ));
         }
         let (tx, rx) = oneshot::channel();
         let inflight = Inflight { future: tx };
@@ -76,10 +79,11 @@ impl WriteStream {
         if let Err(err) = inner_guard.tx.send(request) {
             inner_guard.alive = false;
             inner_guard.fail_inflight();
-            return Err(UnexpectedStatus(err.to_string()));
+            return Err(OxiaError::Disconnected(err.to_string()));
         }
         drop(inner_guard);
-        rx.await.map_err(|err| UnexpectedStatus(err.to_string()))
+        rx.await
+            .map_err(|err| OxiaError::Disconnected(err.to_string()))
     }
 
     pub(crate) async fn get_defer_response(&self) -> Option<Result<WriteResponse, OxiaError>> {
@@ -90,7 +94,7 @@ impl WriteStream {
             option
                 .unwrap()
                 .await
-                .map_err(|err| UnexpectedStatus(err.to_string())),
+                .map_err(|err| OxiaError::Disconnected(err.to_string())),
         )
     }
 
@@ -124,7 +128,7 @@ impl WriteStream {
         if let Some(handle) = guard.take() {
             handle
                 .await
-                .map_err(|err| UnexpectedStatus(err.to_string()))?
+                .map_err(|err| OxiaError::Disconnected(err.to_string()))?
         }
         Ok(())
     }

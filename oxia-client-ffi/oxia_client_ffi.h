@@ -12,18 +12,19 @@
 
 enum COxiaError {
   Ok = 0,
-  TransportError = 1,
-  GrpcStatus = 2,
-  UnexpectedStatus = 3,
-  ShardLeaderNotFound = 4,
-  KeyLeaderNotFound = 5,
-  KeyNotFound = 6,
-  UnexpectedVersionId = 7,
-  SessionDoesNotExist = 8,
-  InternalRetryable = 9,
-  Cancelled = 10,
-  IllegalArgument = 11,
-  RequestTimeout = 12,
+  KeyNotFound = 1,
+  UnexpectedVersionId = 2,
+  SessionExpired = 3,
+  RequestTooLarge = 4,
+  InvalidArgument = 5,
+  LeaderNotFound = 6,
+  NoShardForKey = 7,
+  Disconnected = 8,
+  Timeout = 9,
+  Grpc = 10,
+  Decode = 11,
+  Closed = 12,
+  Other = 13,
 };
 typedef int32_t COxiaError;
 

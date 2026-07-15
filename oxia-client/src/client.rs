@@ -1,10 +1,6 @@
 use crate::batch_manager::{BatchManager, Batcher};
 use crate::client_options::OxiaClientOptions;
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::{
-    IllegalArgument, KeyLeaderNotFound, KeyNotFound, SessionDoesNotExist, UnexpectedStatus,
-    UnexpectedVersionId,
-};
 use crate::key;
 use crate::notification_manager::NotificationManager;
 use crate::operations::{
@@ -526,7 +522,9 @@ impl OxiaClient {
     ) -> Result<(i64, Arc<BatchManager>), OxiaError> {
         match self.inner.shard_manager.get_shard(key) {
             Some(shard_id) => self.get_or_init_batch_manager_with_shard(batcher, shard_id),
-            None => Err(KeyLeaderNotFound(key.to_string())),
+            None => Err(OxiaError::NoShardForKey {
+                key: key.to_string(),
+            }),
         }
     }
 
@@ -595,8 +593,8 @@ impl Client for OxiaClient {
         batch_manager.add(Operation::Put(operation))?;
         let put_response = tokio::time::timeout(self.request_timeout(), rx)
             .await
-            .map_err(|_| OxiaError::RequestTimeout())?
-            .map_err(|err| UnexpectedStatus(err.to_string()))??;
+            .map_err(|_| OxiaError::Timeout)?
+            .map_err(|err| OxiaError::Disconnected(err.to_string()))??;
         check_status(put_response.status)?;
         Ok(PutResult {
             key: put_response.key.unwrap_or(key.clone()),
@@ -624,8 +622,8 @@ impl Client for OxiaClient {
         batch_manager.add(Operation::Delete(operation))?;
         let response = tokio::time::timeout(self.request_timeout(), rx)
             .await
-            .map_err(|_| OxiaError::RequestTimeout())?
-            .map_err(|err| UnexpectedStatus(err.to_string()))??;
+            .map_err(|_| OxiaError::Timeout)?
+            .map_err(|err| OxiaError::Disconnected(err.to_string()))??;
 
         Ok(check_status(response.status)?)
     }
@@ -670,15 +668,15 @@ impl Client for OxiaClient {
             for result in all_results {
                 match result {
                     Ok(get_result) => results.push(get_result),
-                    Err(OxiaError::KeyNotFound()) => {
+                    Err(OxiaError::KeyNotFound) => {
                         // KeyNotFound from some shards is expected for non-partition queries
-                        last_error = Some(KeyNotFound());
+                        last_error = Some(OxiaError::KeyNotFound);
                     }
                     Err(err) => return Err(err),
                 }
             }
             if results.is_empty() {
-                return Err(last_error.unwrap_or(KeyNotFound()));
+                return Err(last_error.unwrap_or(OxiaError::KeyNotFound));
             }
             results.sort();
             let index = match operation.comparison_type {
@@ -714,7 +712,7 @@ impl Client for OxiaClient {
             let local_operation = list_operation.clone();
             let partition_key = local_operation.partition_key.clone().unwrap();
             return match self.inner.shard_manager.get_shard_leader(&partition_key) {
-                None => Err(KeyLeaderNotFound(partition_key)),
+                None => Err(OxiaError::NoShardForKey { key: partition_key }),
                 Some(leader) => {
                     list_from_single_shard(
                         leader,
@@ -770,7 +768,7 @@ impl Client for OxiaClient {
             let local_operation = operation.clone();
             let partition_key = local_operation.partition_key.clone().unwrap();
             return match self.inner.shard_manager.get_shard_leader(&partition_key) {
-                None => Err(KeyLeaderNotFound(partition_key)),
+                None => Err(OxiaError::NoShardForKey { key: partition_key }),
                 Some(leader) => {
                     range_scan_from_single_shard(
                         leader,
@@ -885,7 +883,7 @@ impl Client for OxiaClient {
         let mut manager_guard = self.inner.sequence_updates_manager.lock().await;
         let operation: GetSequenceUpdatesOperation = options.into();
         if operation.partition_key.is_none() {
-            return Err(IllegalArgument(
+            return Err(OxiaError::InvalidArgument(
                 "required option: partition_key".to_string(),
             ));
         }
@@ -905,7 +903,7 @@ impl Client for OxiaClient {
         let inner = match Arc::try_unwrap(self.inner) {
             Ok(inner) => inner,
             Err(arc) => {
-                return Err(UnexpectedStatus(format!(
+                return Err(OxiaError::InvalidArgument(format!(
                     "Cannot shutdown inner: {} other references exist",
                     Arc::strong_count(&arc)
                 )))
@@ -917,7 +915,7 @@ impl Client for OxiaClient {
             let manager = match Arc::try_unwrap(wb) {
                 Ok(inner) => inner,
                 Err(arc) => {
-                    return Err(UnexpectedStatus(format!(
+                    return Err(OxiaError::InvalidArgument(format!(
                         "Cannot shutdown write batch manager: {} other references exist",
                         Arc::strong_count(&arc)
                     )))
@@ -929,7 +927,7 @@ impl Client for OxiaClient {
             let manager = match Arc::try_unwrap(rb) {
                 Ok(inner) => inner,
                 Err(arc) => {
-                    return Err(UnexpectedStatus(format!(
+                    return Err(OxiaError::InvalidArgument(format!(
                         "Cannot shutdown read batch manager: {} other references exist",
                         Arc::strong_count(&arc)
                     )))
@@ -939,14 +937,14 @@ impl Client for OxiaClient {
         }
         while let Some(result) = joiner.join_next().await {
             result.map_err(|err| {
-                UnexpectedStatus(format!("batcher task failed to join: {}", err))
+                OxiaError::Disconnected(format!("batcher task failed to join: {}", err))
             })??;
         }
 
         for nm in match Arc::try_unwrap(inner.notification_managers) {
             Ok(wsm) => wsm,
             Err(arc) => {
-                return Err(UnexpectedStatus(format!(
+                return Err(OxiaError::InvalidArgument(format!(
                     "Cannot shutdown notification managers: {} other references exist",
                     Arc::strong_count(&arc)
                 )))
@@ -962,7 +960,7 @@ impl Client for OxiaClient {
         for nm in match Arc::try_unwrap(inner.sequence_updates_manager) {
             Ok(wsm) => wsm,
             Err(arc) => {
-                return Err(UnexpectedStatus(format!(
+                return Err(OxiaError::InvalidArgument(format!(
                     "Cannot shutdown sequence updates managers: {} other references exist",
                     Arc::strong_count(&arc)
                 )))
@@ -978,7 +976,7 @@ impl Client for OxiaClient {
         match Arc::try_unwrap(inner.write_stream_manager) {
             Ok(wsm) => wsm,
             Err(arc) => {
-                return Err(UnexpectedStatus(format!(
+                return Err(OxiaError::InvalidArgument(format!(
                     "Cannot shutdown write stream manager: {} other references exist",
                     Arc::strong_count(&arc)
                 )))
@@ -990,7 +988,7 @@ impl Client for OxiaClient {
         match Arc::try_unwrap(inner.session_manager) {
             Ok(sm) => sm,
             Err(arc) => {
-                return Err(UnexpectedStatus(format!(
+                return Err(OxiaError::InvalidArgument(format!(
                     "Cannot shutdown session manager: {} other references exist",
                     Arc::strong_count(&arc)
                 )));
@@ -1002,7 +1000,7 @@ impl Client for OxiaClient {
         match Arc::try_unwrap(inner.shard_manager) {
             Ok(sm) => sm,
             Err(arc) => {
-                return Err(UnexpectedStatus(format!(
+                return Err(OxiaError::InvalidArgument(format!(
                     "Cannot shutdown shard manager: {} other references exist",
                     Arc::strong_count(&arc)
                 )));
@@ -1014,7 +1012,7 @@ impl Client for OxiaClient {
         match Arc::try_unwrap(inner.provider_manager) {
             Ok(pm) => pm,
             Err(arc) => {
-                return Err(UnexpectedStatus(format!(
+                return Err(OxiaError::InvalidArgument(format!(
                     "Cannot shutdown provider manager: {} other references exist",
                     Arc::strong_count(&arc)
                 )))
@@ -1052,7 +1050,7 @@ async fn range_scan_from_single_shard(
                 }
             }
             Err(err) => {
-                return Err(UnexpectedStatus(err.to_string()));
+                return Err(OxiaError::from(err));
             }
         }
     }
@@ -1077,7 +1075,7 @@ async fn list_from_single_shard(
         match response {
             Ok(mut response) => keys.append(&mut response.keys),
             Err(err) => {
-                return Err(UnexpectedStatus(err.to_string()));
+                return Err(OxiaError::from(err));
             }
         }
     }
@@ -1095,8 +1093,8 @@ async fn delete_range_from_single_shard(
     batch_manager.add(Operation::DeleteRange(operation))?;
     let response = tokio::time::timeout(timeout, rx)
         .await
-        .map_err(|_| OxiaError::RequestTimeout())?
-        .map_err(|err| UnexpectedStatus(err.to_string()))??;
+        .map_err(|_| OxiaError::Timeout)?
+        .map_err(|err| OxiaError::Disconnected(err.to_string()))??;
     check_status(response.status)
 }
 
@@ -1112,8 +1110,8 @@ async fn get_from_single_shard(
     batch_manager.add(Operation::Get(operation))?;
     let get_response = tokio::time::timeout(timeout, rx)
         .await
-        .map_err(|_| OxiaError::RequestTimeout())?
-        .map_err(|err| UnexpectedStatus(err.to_string()))??;
+        .map_err(|_| OxiaError::Timeout)?
+        .map_err(|err| OxiaError::Disconnected(err.to_string()))??;
     check_status(get_response.status)?;
     Ok(GetResult {
         key: get_response.key.unwrap_or(extra_key),
@@ -1126,11 +1124,11 @@ fn check_status(status: i32) -> Result<(), OxiaError> {
     match Status::try_from(status) {
         Ok(status) => match status {
             Status::Ok => Ok(()),
-            Status::KeyNotFound => Err(KeyNotFound()),
-            Status::UnexpectedVersionId => Err(UnexpectedVersionId()),
-            Status::SessionDoesNotExist => Err(SessionDoesNotExist()),
+            Status::KeyNotFound => Err(OxiaError::KeyNotFound),
+            Status::UnexpectedVersionId => Err(OxiaError::UnexpectedVersionId),
+            Status::SessionDoesNotExist => Err(OxiaError::SessionExpired),
         },
-        Err(err) => Err(UnexpectedStatus(err.to_string())),
+        Err(err) => Err(OxiaError::Decode(format!("invalid status code: {err}"))),
     }
 }
 

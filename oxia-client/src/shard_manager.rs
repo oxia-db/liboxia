@@ -1,6 +1,5 @@
 use crate::address::ensure_protocol;
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::UnexpectedStatus;
 use crate::hash::shard_key_hash;
 use crate::oxia::shard_assignment::ShardBoundaries;
 use crate::oxia::{ShardAssignment, ShardAssignmentsRequest, ShardKeyRouter};
@@ -64,13 +63,13 @@ async fn start_assignments_listener(
                 .provider_manager
                 .get_provider(local_address)
                 .await
-                .map_err(|err| Error::transient(UnexpectedStatus(err.to_string())))?;
+                .map_err(Error::transient)?;
             let mut streaming = provider
                 .get_shard_assignments(ShardAssignmentsRequest {
                     namespace: ns.clone(),
                 })
                 .await
-                .map_err(|err| Error::transient(UnexpectedStatus(err.to_string())))?
+                .map_err(|err| Error::transient(OxiaError::from(err)))?
                 .into_inner();
             loop {
                 tokio::select! {
@@ -102,7 +101,7 @@ async fn start_assignments_listener(
                             }
                         }
                         Err(stream_status) => {
-                             return Err(Error::transient(UnexpectedStatus(stream_status.to_string())));
+                             return Err(Error::transient(OxiaError::from(stream_status)));
                         }
                     }
                     }
@@ -152,7 +151,7 @@ impl ShardManager {
         if let Some(handle) = handle_guard.take() {
             handle
                 .await
-                .map_err(|err| UnexpectedStatus(err.to_string()))?;
+                .map_err(|err| OxiaError::Disconnected(err.to_string()))?;
         }
         Ok(())
     }

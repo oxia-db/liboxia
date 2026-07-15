@@ -1,5 +1,4 @@
 use crate::errors::OxiaError;
-use crate::errors::OxiaError::{KeyLeaderNotFound, UnexpectedStatus};
 use crate::oxia::GetSequenceUpdatesRequest;
 use crate::provider_manager::ProviderManager;
 use crate::shard_manager::ShardManager;
@@ -46,7 +45,7 @@ impl SequenceUpdatesManager {
         if let Some(handle) = self.handle.lock().await.take() {
             handle
                 .await
-                .map_err(|err| UnexpectedStatus(err.to_string()))?;
+                .map_err(|err| OxiaError::Disconnected(err.to_string()))?;
         }
         Ok(())
     }
@@ -70,9 +69,11 @@ async fn start_listener(
         let shard_manager = shard_manager.clone();
         async move {
             match shard_manager.get_shard(&partition_key) {
-                None => Err(Error::transient(KeyLeaderNotFound(partition_key.clone()))),
+                None => Err(Error::transient(OxiaError::NoShardForKey {
+                    key: partition_key.clone(),
+                })),
                 Some(shard) => match shard_manager.get_leader(shard) {
-                    None => Err(Error::transient(KeyLeaderNotFound(partition_key.clone()))),
+                    None => Err(Error::transient(OxiaError::LeaderNotFound { shard })),
                     Some(leader) => {
                         let mut provider = provider_manager
                             .get_provider(leader.service_address)
@@ -84,7 +85,7 @@ async fn start_listener(
                                 key,
                             }))
                             .await
-                            .map_err(|err| Error::transient(UnexpectedStatus(err.to_string())))?
+                            .map_err(|err| Error::transient(OxiaError::from(err)))?
                             .into_inner();
                         loop {
                             tokio::select! {
@@ -96,13 +97,13 @@ async fn start_listener(
                                     match next_response {
                                     None => {
                                         info!("Sequence updates stream closed by server.");
-                                        return Err(Error::transient(UnexpectedStatus(
+                                        return Err(Error::transient(OxiaError::Disconnected(
                                             "sequence updates stream closed by server".to_string(),
                                         )));
                                     }
                                     Some(result) => {
                                         let response = result
-                                            .map_err(|err| Error::transient(UnexpectedStatus(err.to_string())))?;
+                                            .map_err(|err| Error::transient(OxiaError::from(err)))?;
                                         if sender.send(response.highest_sequence_key).await.is_err() {
                                             // Receiver dropped, stop listening
                                             return Ok(());
