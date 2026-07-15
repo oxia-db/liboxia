@@ -55,6 +55,14 @@ pub(crate) struct Inner {
 /// Dropping the last clone tears down all background work abruptly; call
 /// [`close`](OxiaClient::close) for a graceful shutdown that flushes pending
 /// batches and closes sessions.
+///
+/// # Cancellation
+///
+/// Dropping an operation's future stops *waiting* but does not recall the
+/// operation: once submitted to a batch it may still execute on the server.
+/// Use conditional operations (e.g.
+/// [`expected_version_id`](crate::PutBuilder::expected_version_id)) when you
+/// need certainty about what was applied.
 #[derive(Clone)]
 pub struct OxiaClient {
     inner: Arc<Inner>,
@@ -76,6 +84,24 @@ impl OxiaClient {
     }
 
     /// Connects to the given service address (`host:port`) with default options.
+    ///
+    /// Use [`OxiaClient::builder`] to customize the namespace, timeouts, or
+    /// batching before connecting.
+    ///
+    /// # Errors
+    ///
+    /// Fails fast — within the request timeout — when the cluster is
+    /// unreachable ([`OxiaError::Disconnected`] / [`OxiaError::Timeout`]), or
+    /// with [`OxiaError::Grpc`] when the namespace does not exist
+    /// (`NotFound`) or the credentials are rejected (`Unauthenticated`).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), oxia::OxiaError> {
+    /// let client = oxia::OxiaClient::connect("localhost:6648").await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn connect(service_address: impl Into<String>) -> Result<OxiaClient, OxiaError> {
         OxiaClientBuilder::new()
             .service_address(service_address)
@@ -124,12 +150,43 @@ impl OxiaClient {
         })
     }
 
-    /// Stores `value` under `key`.
+    /// Stores `value` under `key`, creating or overwriting the record.
     ///
     /// Returns a [`PutBuilder`]; chain options
     /// ([`ephemeral`](PutBuilder::ephemeral),
-    /// [`expected_version_id`](PutBuilder::expected_version_id), …) and
-    /// `.await` it.
+    /// [`expected_version_id`](PutBuilder::expected_version_id),
+    /// [`partition_key`](PutBuilder::partition_key),
+    /// [`sequence_key_deltas`](PutBuilder::sequence_key_deltas),
+    /// [`secondary_index`](PutBuilder::secondary_index), …) and `.await` it.
+    /// The value is `Bytes`-backed and is not copied on its way to the wire.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns:
+    /// - [`OxiaError::UnexpectedVersionId`] when a
+    ///   [`expected_version_id`](PutBuilder::expected_version_id) /
+    ///   [`expected_record_not_exists`](PutBuilder::expected_record_not_exists)
+    ///   condition does not hold;
+    /// - [`OxiaError::SessionExpired`] when an
+    ///   [`ephemeral`](PutBuilder::ephemeral) put races a session expiry
+    ///   (retrying creates a fresh session);
+    /// - [`OxiaError::Timeout`] when the request timeout elapses;
+    /// - [`OxiaError::Closed`] after [`close`](OxiaClient::close);
+    /// - transient routing/transport errors
+    ///   ([`OxiaError::is_retryable`](crate::OxiaError::is_retryable)).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// let res = client.put("config/mode", "primary").await?;
+    /// // Compare-and-swap on the returned version id:
+    /// client
+    ///     .put("config/mode", "standby")
+    ///     .expected_version_id(res.version.version_id)
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
     pub fn put(&self, key: impl Into<String>, value: impl Into<Bytes>) -> PutBuilder {
         PutBuilder::new(self.clone(), key.into(), value.into())
     }
@@ -138,18 +195,89 @@ impl OxiaClient {
     ///
     /// Returns a [`GetBuilder`]; chain options
     /// ([`comparison`](GetBuilder::comparison),
-    /// [`use_index`](GetBuilder::use_index), …) and `.await` it.
+    /// [`partition_key`](GetBuilder::partition_key),
+    /// [`include_value`](GetBuilder::include_value),
+    /// [`use_index`](GetBuilder::use_index), …) and `.await` it. With a
+    /// non-[`Equal`](crate::ComparisonType::Equal) comparison the returned
+    /// record's key is the *found* key, which may differ from the requested
+    /// one. Records written with a partition key must be read with the same
+    /// partition key.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns:
+    /// - [`OxiaError::KeyNotFound`] when no record matches;
+    /// - [`OxiaError::Timeout`] when the request timeout elapses;
+    /// - [`OxiaError::Closed`] after [`close`](OxiaClient::close);
+    /// - transient routing/transport errors
+    ///   ([`OxiaError::is_retryable`](crate::OxiaError::is_retryable)).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// use oxia::ComparisonType;
+    ///
+    /// let exact = client.get("config/mode").await?;
+    /// let floor = client
+    ///     .get("config/zz")
+    ///     .comparison(ComparisonType::Floor)
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
     pub fn get(&self, key: impl Into<String>) -> GetBuilder {
         GetBuilder::new(self.clone(), key.into())
     }
 
     /// Deletes the record associated with `key`.
+    ///
+    /// Returns a [`DeleteBuilder`]; optionally chain
+    /// [`expected_version_id`](DeleteBuilder::expected_version_id) for a
+    /// conditional delete or
+    /// [`partition_key`](DeleteBuilder::partition_key) for records written
+    /// with one, and `.await` it.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns:
+    /// - [`OxiaError::KeyNotFound`] when the record does not exist;
+    /// - [`OxiaError::UnexpectedVersionId`] when an
+    ///   [`expected_version_id`](DeleteBuilder::expected_version_id)
+    ///   condition does not hold;
+    /// - [`OxiaError::Timeout`] / [`OxiaError::Closed`] / transient errors as
+    ///   for the other operations.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// client.delete("config/mode").await?;
+    /// # Ok(()) }
+    /// ```
     pub fn delete(&self, key: impl Into<String>) -> DeleteBuilder {
         DeleteBuilder::new(self.clone(), key.into())
     }
 
     /// Deletes every record with `min_key_inclusive <= key < max_key_exclusive`
     /// (in Oxia's slash-aware key order).
+    ///
+    /// Without a [`partition_key`](DeleteRangeBuilder::partition_key) the
+    /// deletion is applied on every shard; it is not atomic across shards.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns [`OxiaError::Timeout`],
+    /// [`OxiaError::Closed`], or transient routing/transport errors. Deleting
+    /// an empty range is not an error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// // Everything under the "config/" prefix:
+    /// client.delete_range("config/", "config0").await?;
+    /// # Ok(()) }
+    /// ```
     pub fn delete_range(
         &self,
         min_key_inclusive: impl Into<String>,
@@ -165,8 +293,26 @@ impl OxiaClient {
     /// Lists the keys with `min_key_inclusive <= key < max_key_exclusive`
     /// (in Oxia's slash-aware key order).
     ///
-    /// `.await` the builder for all keys at once, or call
-    /// [`stream()`](ListBuilder::stream) for an incremental, ordered stream.
+    /// `.await` the builder for all keys at once (bounded by the request
+    /// timeout), or call [`stream()`](ListBuilder::stream) for an
+    /// incremental [`ListStream`](crate::ListStream) with no overall
+    /// deadline. Both deliver keys in the server's global key order, merged
+    /// across shards.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns [`OxiaError::Timeout`] when collecting
+    /// all keys exceeds the request timeout, [`OxiaError::Closed`] after
+    /// [`close`](OxiaClient::close), or transient routing/transport errors.
+    /// An empty range yields an empty `Vec`, not an error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// let keys = client.list("config/", "config0").await?;
+    /// # Ok(()) }
+    /// ```
     pub fn list(
         &self,
         min_key_inclusive: impl Into<String>,
@@ -182,9 +328,32 @@ impl OxiaClient {
     /// Reads every record with `min_key_inclusive <= key < max_key_exclusive`
     /// (in Oxia's slash-aware key order).
     ///
-    /// `.await` the builder for all records at once, or call
-    /// [`stream()`](RangeScanBuilder::stream) for an incremental, ordered
-    /// stream with bounded memory use.
+    /// `.await` the builder for all records at once (bounded by the request
+    /// timeout), or call [`stream()`](RangeScanBuilder::stream) for an
+    /// incremental [`RangeScanStream`](crate::RangeScanStream) that holds at
+    /// most one buffered record per shard — prefer it for large ranges. Both
+    /// deliver records in the server's global key order, merged across
+    /// shards.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns [`OxiaError::Timeout`] when collecting
+    /// all records exceeds the request timeout, [`OxiaError::Closed`] after
+    /// [`close`](OxiaClient::close), or transient routing/transport errors.
+    /// An empty range yields an empty `Vec`, not an error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// use futures::TryStreamExt;
+    ///
+    /// let mut scan = client.range_scan("logs/", "logs0").stream().await?;
+    /// while let Some(record) = scan.try_next().await? {
+    ///     println!("{} => {:?}", record.key, record.value);
+    /// }
+    /// # Ok(()) }
+    /// ```
     pub fn range_scan(
         &self,
         min_key_inclusive: impl Into<String>,
@@ -199,13 +368,67 @@ impl OxiaClient {
 
     /// Subscribes to all changes applied to the database, streamed as
     /// [`Notification`](crate::Notification)s.
+    ///
+    /// Awaiting the builder yields a [`Notifications`](crate::Notifications)
+    /// handle. Per-shard subscriptions are established in the background and
+    /// re-established automatically after connection loss, resuming from the
+    /// last delivered offset so no notification in between is lost. Events
+    /// from the same shard arrive in order; interleaving across shards is
+    /// unspecified. Changes made before the subscription is fully established
+    /// may not be delivered.
+    ///
+    /// Dropping the handle ends the subscription. When the channel buffer
+    /// ([`buffer_size`](NotificationsBuilder::buffer_size)) is full, delivery
+    /// applies backpressure to the per-shard listeners.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns [`OxiaError::Closed`] after
+    /// [`close`](OxiaClient::close).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// let mut notifications = client.notifications().await?;
+    /// while let Some(event) = notifications.recv().await {
+    ///     println!("{event}");
+    /// }
+    /// # Ok(()) }
+    /// ```
     pub fn notifications(&self) -> NotificationsBuilder {
         NotificationsBuilder::new(self.clone())
     }
 
     /// Subscribes to updates of the sequence rooted at `key`, delivering the
     /// highest assigned sequence key as it advances. `partition_key` must be
-    /// the partition key the sequential records are written with.
+    /// the partition key the sequential records are written with
+    /// (see [`PutBuilder::sequence_key_deltas`]).
+    ///
+    /// Awaiting the builder yields a
+    /// [`SequenceUpdates`](crate::SequenceUpdates) handle. Consecutive
+    /// advances may be coalesced: each delivery carries the *highest*
+    /// sequence key at that moment. The subscription reconnects automatically
+    /// after connection loss; dropping the handle ends it.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns [`OxiaError::Closed`] after
+    /// [`close`](OxiaClient::close).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// let mut updates = client.sequence_updates("seq/events", "pk-0").await?;
+    /// client
+    ///     .put("seq/events", "data")
+    ///     .partition_key("pk-0")
+    ///     .sequence_key_deltas([1])
+    ///     .await?;
+    /// let highest = updates.recv().await;
+    /// # Ok(()) }
+    /// ```
     pub fn sequence_updates(
         &self,
         key: impl Into<String>,
@@ -215,11 +438,28 @@ impl OxiaClient {
     }
 
     /// Closes the client gracefully: pending batches are flushed, subscriptions
-    /// stop, sessions are closed server-side (removing this client's ephemeral
-    /// records), and connections are released.
+    /// stop, sessions are closed server-side (immediately removing this
+    /// client's ephemeral records), and connections are released.
     ///
     /// Idempotent: subsequent calls (from any clone) return `Ok(())`.
     /// Operations submitted after `close` fail with [`OxiaError::Closed`].
+    /// Merely dropping every clone instead tears the client down abruptly:
+    /// queued operations are not flushed and ephemeral records linger until
+    /// their session times out.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error encountered while shutting down (shutdown
+    /// still proceeds through every component). Only the first call can
+    /// return an error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// client.close().await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn close(&self) -> Result<(), OxiaError> {
         if self.inner.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
