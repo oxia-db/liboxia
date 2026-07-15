@@ -6,6 +6,7 @@ use crate::shard_manager::ShardManager;
 use crate::status::CODE_SESSION_NOT_FOUND;
 use dashmap::DashMap;
 use log::{info, warn};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, OnceCell};
@@ -24,6 +25,9 @@ struct Inner {
 struct Session {
     context: CancellationToken,
     handle: Mutex<Option<JoinHandle<()>>>,
+    /// Set to `false` by the keep-alive task once the server reports the session
+    /// no longer exists, so [`SessionManager::get_session_id`] re-creates it.
+    alive: Arc<AtomicBool>,
     inner: Arc<Inner>,
 }
 
@@ -31,22 +35,25 @@ impl Session {
     pub fn new(
         shard_id: i64,
         session_id: i64,
-        session_timeout: Duration,
+        keep_alive_interval: Duration,
         shard_manager: Arc<ShardManager>,
         provider_manager: Arc<ProviderManager>,
     ) -> Self {
         let context = CancellationToken::new();
+        let alive = Arc::new(AtomicBool::new(true));
         let handle = Mutex::new(Some(tokio::spawn(start_keep_alive(
             context.clone(),
             shard_manager.clone(),
             provider_manager.clone(),
             shard_id,
             session_id,
-            session_timeout,
+            keep_alive_interval,
+            alive.clone(),
         ))));
         let session = Self {
             handle,
             context,
+            alive,
             inner: Arc::new(Inner {
                 id: session_id,
                 shard_id,
@@ -60,6 +67,12 @@ impl Session {
         );
         session
     }
+
+    /// Whether the session is still believed valid. Turns `false` once the
+    /// keep-alive observes that the server has expired it.
+    fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+    }
 }
 
 impl Drop for Session {
@@ -68,20 +81,21 @@ impl Drop for Session {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_keep_alive(
     context: CancellationToken,
     shard_manager: Arc<ShardManager>,
     provider_manager: Arc<ProviderManager>,
     shard_id: i64,
     session_id: i64,
-    session_timeout: Duration,
+    keep_alive_interval: Duration,
+    alive: Arc<AtomicBool>,
 ) {
-    // Send heartbeats at 1/3 of the session timeout to ensure we don't miss
-    let heartbeat_interval = session_timeout / 3;
     let op_defer = || {
         let local_shard_manager = shard_manager.clone();
         let local_provider_manager = provider_manager.clone();
         let local_context = context.clone();
+        let local_alive = alive.clone();
         async move {
             match local_shard_manager.get_leader(shard_id) {
                 None => Err(RetryError::transient(OxiaError::LeaderNotFound {
@@ -92,7 +106,7 @@ async fn start_keep_alive(
                         .get_provider(leader.service_address)
                         .await
                         .map_err(RetryError::transient)?;
-                    let mut ticker = interval(heartbeat_interval);
+                    let mut ticker = interval(keep_alive_interval);
                     loop {
                         tokio::select! {
                             _ = local_context.cancelled() => {
@@ -100,16 +114,18 @@ async fn start_keep_alive(
                                 return Ok(());
                             },
                             _ = ticker.tick() => {
-                                provider
+                                if let Err(err) = provider
                                     .keep_alive(Request::new(SessionHeartbeat { shard: shard_id, session_id }))
                                     .await
-                                    .map_err(|err| {
-                                        if err.code() as i32 == CODE_SESSION_NOT_FOUND {
-                                            info!("Session keep-alive exit due to session not found.");
-                                            return RetryError::fatal(OxiaError::SessionExpired);
-                                        }
-                                        RetryError::transient(OxiaError::from(err))
-                                    })?;
+                                {
+                                    if err.code() as i32 == CODE_SESSION_NOT_FOUND {
+                                        info!("Session {session_id} on shard {shard_id} expired; it will be re-created on next use.");
+                                        // Mark dead so get_session_id re-creates it, then stop.
+                                        local_alive.store(false, Ordering::Release);
+                                        return Err(RetryError::fatal(OxiaError::SessionExpired));
+                                    }
+                                    return Err(RetryError::transient(OxiaError::from(err)));
+                                }
                             }
                         }
                     }
@@ -157,6 +173,7 @@ impl Session {
 pub(crate) struct SessionManager {
     identity: String,
     session_timeout: Duration,
+    session_keep_alive: Duration,
     sessions: DashMap<i64, OnceCell<Session>>,
     shard_manager: Arc<ShardManager>,
     provider_manager: Arc<ProviderManager>,
@@ -166,12 +183,14 @@ impl SessionManager {
     pub(crate) fn new(
         identity: String,
         session_timeout: Duration,
+        session_keep_alive: Duration,
         shard_manager: Arc<ShardManager>,
         provider_manager: Arc<ProviderManager>,
     ) -> Self {
         SessionManager {
             identity,
             session_timeout,
+            session_keep_alive,
             sessions: DashMap::new(),
             shard_manager,
             provider_manager,
@@ -179,7 +198,13 @@ impl SessionManager {
     }
 
     pub(crate) async fn get_session_id(&self, shard_id: i64) -> Result<i64, OxiaError> {
-        let session_cell = self.sessions.entry(shard_id).or_default();
+        let mut session_cell = self.sessions.entry(shard_id).or_default();
+        // If a previously created session has expired (its keep-alive saw
+        // SESSION_NOT_FOUND), discard it so a fresh one is created below — the
+        // caller then transparently gets a working session.
+        if session_cell.get().is_some_and(|s| !s.is_alive()) {
+            *session_cell = OnceCell::new();
+        }
         let session = session_cell
             .get_or_try_init(|| async {
                 match self.shard_manager.get_leader(shard_id) {
@@ -201,7 +226,7 @@ impl SessionManager {
                         Ok(Session::new(
                             shard_id,
                             session_id,
-                            self.session_timeout,
+                            self.session_keep_alive,
                             self.shard_manager.clone(),
                             self.provider_manager.clone(),
                         ))
