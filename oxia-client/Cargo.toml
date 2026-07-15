@@ -12,7 +12,6 @@ homepage = "https://github.com/oxia-db/oxia-client-rust"
 name = "oxia"
 
 [dependencies]
-backoff = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }

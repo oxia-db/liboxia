@@ -1,9 +1,9 @@
 use crate::errors::OxiaError;
 use crate::oxia::{CloseSessionRequest, CreateSessionRequest, SessionHeartbeat};
 use crate::provider_manager::ProviderManager;
+use crate::retry::{retry_until_cancelled, RetryError};
 use crate::shard_manager::ShardManager;
 use crate::status::CODE_SESSION_NOT_FOUND;
-use backoff::{Error, ExponentialBackoff};
 use dashmap::DashMap;
 use log::{info, warn};
 use std::sync::Arc;
@@ -84,14 +84,14 @@ async fn start_keep_alive(
         let local_context = context.clone();
         async move {
             match local_shard_manager.get_leader(shard_id) {
-                None => Err(Error::transient(OxiaError::LeaderNotFound {
+                None => Err(RetryError::transient(OxiaError::LeaderNotFound {
                     shard: shard_id,
                 })),
                 Some(leader) => {
                     let mut provider = local_provider_manager
                         .get_provider(leader.service_address)
                         .await
-                        .map_err(Error::transient)?;
+                        .map_err(RetryError::transient)?;
                     let mut ticker = interval(heartbeat_interval);
                     loop {
                         tokio::select! {
@@ -106,9 +106,9 @@ async fn start_keep_alive(
                                     .map_err(|err| {
                                         if err.code() as i32 == CODE_SESSION_NOT_FOUND {
                                             info!("Session keep-alive exit due to session not found.");
-                                            return Error::permanent(OxiaError::SessionExpired);
+                                            return RetryError::fatal(OxiaError::SessionExpired);
                                         }
-                                        Error::transient(OxiaError::from(err))
+                                        RetryError::transient(OxiaError::from(err))
                                     })?;
                             }
                         }
@@ -117,14 +117,7 @@ async fn start_keep_alive(
             }
         }
     };
-    let backoff = ExponentialBackoff::default();
-    let _ = backoff::future::retry_notify(backoff, op_defer, |err, duration| {
-        warn!(
-            "Transient failure when session keep-alive. error: {:?} retry-after: {:?}.",
-            err, duration
-        )
-    })
-    .await;
+    retry_until_cancelled(&context, "session-keep-alive", op_defer).await;
 }
 
 impl Session {
