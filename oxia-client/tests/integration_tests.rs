@@ -1716,3 +1716,21 @@ async fn test_concurrent_cas_conflict() {
         .unwrap();
     client.shutdown().await.unwrap();
 }
+
+/// P1-3: building a client against an unreachable cluster must fail fast within
+/// the request timeout instead of returning a client with an empty routing
+/// table (or hanging). No server is started here.
+#[tokio::test]
+async fn build_fails_fast_when_cluster_unreachable() {
+    let build = OxiaClientBuilder::new()
+        .service_address("http://127.0.0.1:1".to_string())
+        .request_timeout(Duration::from_secs(2))
+        .build();
+    // Bound the whole thing well above the request timeout: if `build` returns
+    // an error we failed fast; if this outer timeout fires, it hung.
+    match tokio::time::timeout(Duration::from_secs(15), build).await {
+        Ok(Ok(_)) => panic!("build unexpectedly succeeded against an unreachable cluster"),
+        Ok(Err(_)) => {}
+        Err(_) => panic!("build hung instead of failing fast within the request timeout"),
+    }
+}

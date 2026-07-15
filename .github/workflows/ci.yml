@@ -40,5 +40,12 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+      # The dockerized integration tests each start a container and, on a cold
+      # runner, would otherwise all pull this image at once — concurrent pulls of
+      # the same image race in the Docker client ("bytes remaining on stream").
+      # Pull it once up front so the tests find it already present.
+      - name: Pre-pull Oxia test image
+        run: docker pull oxia/oxia:main
+
       - name: Run tests
         run: cargo test --workspace

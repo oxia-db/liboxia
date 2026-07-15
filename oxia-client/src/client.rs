@@ -355,6 +355,7 @@ impl OxiaClient {
                 address: options.service_address.clone(),
                 namespace: options.namespace.clone(),
                 provider_manager: provider_manager.clone(),
+                request_timeout: options.request_timeout,
             })
             .await?,
         );
