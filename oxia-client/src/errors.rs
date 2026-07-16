@@ -91,6 +91,12 @@ pub enum OxiaError {
     #[error("failed to decode server response: {0}")]
     Decode(String),
 
+    /// A shard was split or merged while an operation targeted it. The client
+    /// re-routes such operations to the new shard automatically, so this is not
+    /// normally observed. Retryable (by re-routing).
+    #[error("shard was split or merged")]
+    ShardMoved,
+
     /// The client has been shut down and can no longer be used.
     #[error("client is closed")]
     Closed,
@@ -109,6 +115,7 @@ impl OxiaError {
         match self {
             OxiaError::LeaderNotFound { .. }
             | OxiaError::NoShardForKey { .. }
+            | OxiaError::ShardMoved
             | OxiaError::Disconnected(_) => true,
             OxiaError::Grpc { code, .. } => {
                 // `Cancelled` here is the *server's* context cancellation
@@ -184,6 +191,7 @@ mod tests {
         assert!(!OxiaError::UnexpectedVersionId.is_retryable());
         assert!(!OxiaError::SessionExpired.is_retryable());
         assert!(!OxiaError::RequestTooLarge.is_retryable());
+        assert!(OxiaError::ShardMoved.is_retryable());
         assert!(!OxiaError::Timeout.is_retryable());
         assert!(!OxiaError::Closed.is_retryable());
         assert!(

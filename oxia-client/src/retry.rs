@@ -32,6 +32,36 @@ pub(crate) fn retry_delay(attempt: u32) -> Duration {
         .min(OP_RETRY_MAX_DELAY)
 }
 
+/// Repeatedly runs `attempt` until it returns a value or an error for which
+/// `is_retryable` is false, or `timeout` elapses (returning the last retryable
+/// error). Backs off between attempts. This drives the client's operation-level
+/// re-routing/retries (shard split/merge, assignments not yet loaded).
+pub(crate) async fn retry_until<T, A, Fut>(
+    timeout: Duration,
+    is_retryable: impl Fn(&OxiaError) -> bool,
+    mut attempt: A,
+) -> Result<T, OxiaError>
+where
+    A: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, OxiaError>>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut n = 0u32;
+    loop {
+        match attempt().await {
+            Err(err) if is_retryable(&err) => {
+                let delay = retry_delay(n);
+                n += 1;
+                if tokio::time::Instant::now() + delay >= deadline {
+                    return Err(err);
+                }
+                tokio::time::sleep(delay).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 /// The failure mode of a single attempt of a retried operation.
 pub(crate) enum RetryError {
     /// A transient failure; retry after a backoff delay.
@@ -141,6 +171,75 @@ mod tests {
             Err(RetryError::transient(OxiaError::Timeout))
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn retry_until_returns_ok_without_retrying() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls = AtomicU32::new(0);
+        let out: Result<u32, OxiaError> = retry_until(
+            Duration::from_secs(60),
+            |_| true,
+            || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(7)
+            },
+        )
+        .await;
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_until_returns_non_retryable_immediately() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls = AtomicU32::new(0);
+        let out: Result<(), OxiaError> = retry_until(
+            Duration::from_secs(60),
+            |e| e.is_retryable(),
+            || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(OxiaError::KeyNotFound)
+            },
+        )
+        .await;
+        assert!(matches!(out, Err(OxiaError::KeyNotFound)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_until_retries_then_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        // Fail with a retryable error twice (e.g. shard still moving), then
+        // succeed once the new assignment lands. Paused time makes the backoff
+        // sleeps instant.
+        let calls = AtomicU32::new(0);
+        let out: Result<u32, OxiaError> = retry_until(
+            Duration::from_secs(60),
+            |e| e.is_retryable(),
+            || async {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err(OxiaError::ShardMoved)
+                } else {
+                    Ok(n)
+                }
+            },
+        )
+        .await;
+        assert_eq!(out.unwrap(), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_until_gives_up_at_deadline_with_last_error() {
+        let out: Result<(), OxiaError> = retry_until(
+            Duration::from_secs(1),
+            |e| e.is_retryable(),
+            || async { Err(OxiaError::ShardMoved) },
+        )
+        .await;
+        assert!(matches!(out, Err(OxiaError::ShardMoved)));
     }
 
     #[tokio::test]

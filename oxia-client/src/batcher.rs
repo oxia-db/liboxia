@@ -278,6 +278,16 @@ struct WriteState {
 }
 
 /// Batches write operations for one shard.
+/// Whether `shard` still exists; if not, an op targeting it must re-route.
+fn absent_shard_error(deps: &BatcherDeps, shard: i64) -> OxiaError {
+    if deps.shard_manager.shard_exists(shard) {
+        OxiaError::LeaderNotFound { shard }
+    } else {
+        // Split or merged away: the operation builders re-route to the new shard.
+        OxiaError::ShardMoved
+    }
+}
+
 pub(crate) struct WriteBatcher {
     shard: i64,
     deps: Arc<BatcherDeps>,
@@ -521,9 +531,7 @@ impl WriteBatcher {
                 self.deps
                     .shard_manager
                     .get_leader(self.shard)
-                    .ok_or_else(|| {
-                        DecodedStatus::from(OxiaError::LeaderNotFound { shard: self.shard })
-                    })?
+                    .ok_or_else(|| DecodedStatus::from(absent_shard_error(&self.deps, self.shard)))?
                     .service_address
             }
         };
@@ -573,7 +581,11 @@ impl WriteBatcher {
             }
             let mut expired: Vec<WriteCallbacks> = Vec::new();
             let mut failed: Vec<WriteCallbacks> = Vec::new();
-            if error.is_retryable() && !st.queues.closed {
+            // A split/merged shard is retryable-by-rerouting, not by re-sending
+            // to the same (now dead) shard: let it fall through to fail so the
+            // builders re-route.
+            if error.is_retryable() && !matches!(error, OxiaError::ShardMoved) && !st.queues.closed
+            {
                 st.failure_streak += 1;
                 // Requeue in dispatch order ahead of previously-requeued
                 // batches (which are newer), dropping the ones out of time.
@@ -810,7 +822,10 @@ impl ReadBatcher {
                     }
                     let delay = retry_delay(attempt);
                     attempt += 1;
-                    if !decoded.error.is_retryable() || Instant::now() + delay >= deadline {
+                    if !decoded.error.is_retryable()
+                        || matches!(decoded.error, OxiaError::ShardMoved)
+                        || Instant::now() + delay >= deadline
+                    {
                         fail_all(callbacks, &decoded.error);
                         return;
                     }
@@ -838,9 +853,7 @@ impl ReadBatcher {
                 self.deps
                     .shard_manager
                     .get_leader(self.shard)
-                    .ok_or_else(|| {
-                        DecodedStatus::from(OxiaError::LeaderNotFound { shard: self.shard })
-                    })?
+                    .ok_or_else(|| DecodedStatus::from(absent_shard_error(&self.deps, self.shard)))?
                     .service_address
             }
         };
