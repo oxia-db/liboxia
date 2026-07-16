@@ -2,8 +2,8 @@ use crate::errors::OxiaError;
 use crate::proto::{CloseSessionRequest, CreateSessionRequest, SessionHeartbeat};
 use crate::provider_manager::ProviderManager;
 use crate::retry::{RetryError, retry_until_cancelled};
+use crate::server_error::decode_status;
 use crate::shard_manager::ShardManager;
-use crate::status::CODE_SESSION_NOT_FOUND;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,13 +123,16 @@ async fn start_keep_alive(
                                 heartbeat.set_timeout(request_timeout);
                                 if let Err(err) = provider.keep_alive(heartbeat).await
                                 {
-                                    if err.code() as i32 == CODE_SESSION_NOT_FOUND {
+                                    // The server reports an expired session as
+                                    // NotFound with ErrorInfo reason SESSION_NOT_FOUND.
+                                    let decoded = decode_status(err);
+                                    if matches!(decoded.error, OxiaError::SessionExpired) {
                                         info!("Session {session_id} on shard {shard_id} expired; it will be re-created on next use.");
                                         // Mark dead so get_session_id re-creates it, then stop.
                                         local_alive.store(false, Ordering::Release);
                                         return Err(RetryError::fatal(OxiaError::SessionExpired));
                                     }
-                                    return Err(RetryError::transient(OxiaError::from(err)));
+                                    return Err(RetryError::transient(decoded.error));
                                 }
                             }
                         }

@@ -21,10 +21,17 @@ async fn start_oxia() -> (ContainerAsync<GenericImage>, String) {
         .await
         .expect("Failed to start Oxia container");
 
-    let host_port = container
-        .get_host_port_ipv4(OXIA_PORT)
-        .await
-        .expect("Failed to get host port");
+    // Under heavy parallel container churn, docker inspect can briefly race
+    // the port mapping; retry a few times before giving up.
+    let mut host_port = container.get_host_port_ipv4(OXIA_PORT).await;
+    for _ in 0..20 {
+        if host_port.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        host_port = container.get_host_port_ipv4(OXIA_PORT).await;
+    }
+    let host_port = host_port.expect("Failed to get host port");
 
     let address = format!("http://127.0.0.1:{}", host_port);
     (container, address)
@@ -1746,5 +1753,73 @@ async fn test_adaptive_window_of_one_under_concurrency() {
         let got = get.await.unwrap();
         assert_eq!(got.value.as_deref(), Some(format!("v{i}").as_bytes()));
     }
+    client.close().await.unwrap();
+}
+
+// ============================================================
+// Retry / Outage Tests (P1-11)
+// ============================================================
+
+/// Starts Oxia on a host port that stays stable across container
+/// stop/start. Docker re-assigns ephemeral (`-P`) host ports on restart, so
+/// the restart test must pin one — like any real deployment, where an
+/// endpoint keeps its address across restarts.
+async fn start_oxia_fixed_port() -> (ContainerAsync<GenericImage>, String) {
+    let image = std::env::var("OXIA_IMAGE").unwrap_or_else(|_| DEFAULT_OXIA_IMAGE.to_string());
+    let tag = std::env::var("OXIA_TAG").unwrap_or_else(|_| DEFAULT_OXIA_TAG.to_string());
+
+    // Grab a free host port and release it just before the container binds it.
+    let host_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+
+    let container = GenericImage::new(image, tag)
+        .with_wait_for(WaitFor::message_on_stdout("Started Grpc server"))
+        .with_mapped_port(host_port, ContainerPort::Tcp(OXIA_PORT))
+        .with_cmd(vec!["oxia", "standalone"])
+        .start()
+        .await
+        .expect("Failed to start Oxia container");
+
+    let address = format!("http://127.0.0.1:{}", host_port);
+    (container, address)
+}
+
+/// Operations issued while the server is down must ride through the outage on
+/// the client's internal retries and complete once the server is back.
+#[tokio::test]
+async fn test_operations_survive_server_restart() {
+    let (container, address) = start_oxia_fixed_port().await;
+    let client = OxiaClientBuilder::new()
+        .service_address(address)
+        .request_timeout(Duration::from_secs(60))
+        .build()
+        .await
+        .unwrap();
+
+    client.put("outage/before", b"v1".to_vec()).await.unwrap();
+
+    container.stop().await.expect("stop oxia");
+    let restarter = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        container.start().await.expect("restart oxia");
+        container
+    });
+
+    // Issued against a stopped server: the write batcher must retry (fresh
+    // stream + backoff) until the server returns.
+    client.put("outage/during", b"v2".to_vec()).await.unwrap();
+
+    // Reads retry through their own path.
+    let got = client.get("outage/during").await.unwrap();
+    assert_eq!(got.value.as_deref(), Some(b"v2".as_ref()));
+
+    // List/scan opens retry too.
+    let keys = client.list("outage/", "outage/~").await.unwrap();
+    assert!(keys.contains(&"outage/during".to_string()));
+
+    let _container = restarter.await.unwrap();
     client.close().await.unwrap();
 }

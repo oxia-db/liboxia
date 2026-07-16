@@ -20,6 +20,18 @@ const MAX_DELAY: Duration = Duration::from_secs(30);
 /// backoff, so long-lived streams reconnect quickly after an occasional error.
 const RESET_AFTER: Duration = Duration::from_secs(10);
 
+/// Backoff for operation-level retries (failed batches, stream opens).
+/// Attempts are bounded by the request timeout, so the cap stays low.
+const OP_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(100);
+const OP_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+
+/// The delay before retry `attempt` (0-based) of a failed operation.
+pub(crate) fn retry_delay(attempt: u32) -> Duration {
+    OP_RETRY_INITIAL_DELAY
+        .saturating_mul(1u32 << attempt.min(16))
+        .min(OP_RETRY_MAX_DELAY)
+}
+
 /// The failure mode of a single attempt of a retried operation.
 pub(crate) enum RetryError {
     /// A transient failure; retry after a backoff delay.

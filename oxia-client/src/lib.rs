@@ -63,6 +63,14 @@
 //! version condition) with application-level judgment. Each operation on
 //! [`OxiaClient`] documents the errors it can produce.
 //!
+//! The client retries retryable failures internally — re-routing via the
+//! leader hints the server attaches to routing errors, with exponential
+//! backoff, bounded by the request timeout — so the errors you observe are
+//! post-retry. One consequence, shared with the reference clients: a write
+//! whose batch failed *after* reaching the wire may be retried even though the
+//! server already applied it, so unconditional writes have at-least-once
+//! semantics under retries; version-conditioned writes are exactly-once.
+//!
 //! # Cancellation
 //!
 //! Dropping an operation's future stops waiting but does not recall an
@@ -88,9 +96,9 @@ mod provider_manager;
 mod requests;
 mod retry;
 mod sequence_updates_manager;
+mod server_error;
 mod session_manager;
 mod shard_manager;
-mod status;
 mod streams;
 mod types;
 
