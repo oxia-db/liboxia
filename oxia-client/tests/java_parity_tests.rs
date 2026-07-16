@@ -256,17 +256,46 @@ async fn test_partition_key() {
     client.close().await.unwrap();
 }
 
-/// Port of `OxiaClientIT.testSequentialKeys` (happy path): server-assigned keys
-/// are the base plus one zero-padded 20-digit segment per delta.
+/// Port of `OxiaClientIT.testSequentialKeys`: invalid sequence-key options are
+/// rejected client-side, and server-assigned keys are the base plus one
+/// zero-padded 20-digit segment per delta.
 ///
-/// The Java test also asserts four client-side validation errors
-/// (`IllegalArgumentException`) that this client does not yet enforce; that
-/// divergence is tracked separately, and negative deltas are already impossible
-/// here (`sequence_key_deltas` takes `u64`).
+/// The Java test's negative-delta case is not portable — `sequence_key_deltas`
+/// takes `u64`, so negatives cannot be expressed. Java throws
+/// `IllegalArgumentException` synchronously; this client returns
+/// `Err(InvalidArgument)` when the builder is awaited.
 #[tokio::test]
 async fn test_sequential_keys() {
     let (_container, address) = start_oxia().await;
     let client = new_client(&address).await;
+
+    // Sequential keys require a partition key.
+    assert!(matches!(
+        client
+            .put("sk_a", b"0".to_vec())
+            .sequence_key_deltas(vec![1])
+            .await,
+        Err(OxiaError::InvalidArgument(_))
+    ));
+    // A zero delta is rejected.
+    assert!(matches!(
+        client
+            .put("sk_a", b"0".to_vec())
+            .partition_key("x")
+            .sequence_key_deltas(vec![0])
+            .await,
+        Err(OxiaError::InvalidArgument(_))
+    ));
+    // Sequential keys cannot be combined with an expected version.
+    assert!(matches!(
+        client
+            .put("sk_a", b"0".to_vec())
+            .partition_key("x")
+            .sequence_key_deltas(vec![1])
+            .expected_version_id(1)
+            .await,
+        Err(OxiaError::InvalidArgument(_))
+    ));
 
     let r1 = client
         .put("sk_a", b"0".to_vec())

@@ -68,8 +68,13 @@ impl PutBuilder {
     }
 
     /// Turns the key into a server-generated sequential key: each delta is
-    /// added to the current highest sequence and appended as a suffix.
-    /// Requires [`partition_key`](PutBuilder::partition_key).
+    /// added to the current highest sequence and appended as a zero-padded
+    /// suffix.
+    ///
+    /// Requires [`partition_key`](PutBuilder::partition_key); every delta must
+    /// be greater than zero; and it cannot be combined with
+    /// [`expected_version_id`](PutBuilder::expected_version_id). Awaiting a put
+    /// that violates any of these fails with [`OxiaError::InvalidArgument`].
     pub fn sequence_key_deltas(mut self, deltas: impl IntoIterator<Item = u64>) -> Self {
         self.sequence_key_deltas = deltas.into_iter().collect();
         self
@@ -99,6 +104,27 @@ impl PutBuilder {
     async fn execute(self) -> Result<PutResult, OxiaError> {
         let client = self.client;
         client.ensure_open()?;
+        // Validate sequence-key puts up front (matching the Java client's
+        // `PutOperation`): sequential keys require a partition key, are
+        // incompatible with an expected version, and every delta must be
+        // positive. Negative deltas are already impossible (`u64`).
+        if !self.sequence_key_deltas.is_empty() {
+            if self.partition_key.is_none() {
+                return Err(OxiaError::InvalidArgument(
+                    "sequence_key_deltas requires a partition_key".to_string(),
+                ));
+            }
+            if self.expected_version_id.is_some() {
+                return Err(OxiaError::InvalidArgument(
+                    "sequence_key_deltas cannot be combined with expected_version_id".to_string(),
+                ));
+            }
+            if self.sequence_key_deltas.contains(&0) {
+                return Err(OxiaError::InvalidArgument(
+                    "every sequence delta must be greater than zero".to_string(),
+                ));
+            }
+        }
         let routing_key = self
             .partition_key
             .as_deref()
