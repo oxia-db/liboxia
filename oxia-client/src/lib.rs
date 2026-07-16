@@ -82,6 +82,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![allow(clippy::result_large_err)]
+// A panic on wire data must never take down the caller's process: forbid
+// `.unwrap()` in library code so every fallible result is handled. Unit tests
+// (compiled with `cfg(test)`) are exempt, where unwrapping is the idiom.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
 mod address;
 mod batcher;
