@@ -225,25 +225,30 @@ impl GetBuilder {
     async fn execute(self) -> Result<GetResult, OxiaError> {
         let client = self.client;
         client.ensure_open()?;
+        let single_shard = is_single_shard_get(
+            self.partition_key.is_some(),
+            self.comparison,
+            self.secondary_index_name.is_some(),
+        );
         let request = proto::GetRequest {
             key: self.key.clone(),
             include_value: self.include_value,
             comparison_type: self.comparison.to_proto() as i32,
             secondary_index_name: self.secondary_index_name,
         };
-        match self.partition_key {
-            Some(partition_key) => {
-                let response = client
-                    .with_shard_retry(&partition_key, |shard| {
-                        let client = client.clone();
-                        let request = request.clone();
-                        async move { client.submit_get(shard, request).await }
-                    })
-                    .await?;
-                check_status(response.status)?;
-                GetResult::from_proto(response, Some(self.key))
-            }
-            None => client.broadcast_get(request, self.comparison).await,
+        if single_shard {
+            let route_key = self.partition_key.unwrap_or_else(|| self.key.clone());
+            let response = client
+                .with_shard_retry(&route_key, |shard| {
+                    let client = client.clone();
+                    let request = request.clone();
+                    async move { client.submit_get(shard, request).await }
+                })
+                .await?;
+            check_status(response.status)?;
+            GetResult::from_proto(response, Some(self.key))
+        } else {
+            client.broadcast_get(request, self.comparison).await
         }
     }
 }
@@ -255,6 +260,21 @@ impl IntoFuture for GetBuilder {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.execute())
     }
+}
+
+/// Whether a get is pinned to a single shard (routed by partition key, or by
+/// the primary key for an exact match) rather than broadcast to every shard.
+///
+/// A partition key always pins the query. Without one, only an exact
+/// ([`Equal`](ComparisonType::Equal)) primary-key lookup owns a single shard;
+/// an inequality comparison (its nearest match may sit on any shard) or a
+/// secondary-index lookup (indexed independently on each shard) must fan out.
+fn is_single_shard_get(
+    has_partition_key: bool,
+    comparison: ComparisonType,
+    has_secondary_index: bool,
+) -> bool {
+    has_partition_key || (comparison == ComparisonType::Equal && !has_secondary_index)
 }
 
 /// A pending `delete`, created with [`OxiaClient::delete`]. Chain options and
@@ -642,5 +662,49 @@ impl IntoFuture for SequenceUpdatesBuilder {
                 .open_sequence_updates(self.key, self.partition_key, self.buffer_size)
                 .await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equal_primary_key_get_is_single_shard() {
+        // The common case: exact get by key, no partition key, no index.
+        assert!(is_single_shard_get(false, ComparisonType::Equal, false));
+    }
+
+    #[test]
+    fn a_partition_key_always_pins_the_shard() {
+        for comparison in [
+            ComparisonType::Equal,
+            ComparisonType::Floor,
+            ComparisonType::Ceiling,
+            ComparisonType::Lower,
+            ComparisonType::Higher,
+        ] {
+            assert!(is_single_shard_get(true, comparison, false));
+            // Even a secondary-index lookup is pinned when a partition key routes it.
+            assert!(is_single_shard_get(true, comparison, true));
+        }
+    }
+
+    #[test]
+    fn inequality_gets_without_partition_key_broadcast() {
+        for comparison in [
+            ComparisonType::Floor,
+            ComparisonType::Ceiling,
+            ComparisonType::Lower,
+            ComparisonType::Higher,
+        ] {
+            assert!(!is_single_shard_get(false, comparison, false));
+        }
+    }
+
+    #[test]
+    fn secondary_index_get_without_partition_key_broadcasts() {
+        // Even an exact match must fan out when it targets a secondary index.
+        assert!(!is_single_shard_get(false, ComparisonType::Equal, true));
     }
 }
