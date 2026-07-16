@@ -1,6 +1,7 @@
 //! Streaming result types: ordered range scans / lists merged across shards,
 //! and the notification / sequence-update subscription handles.
 
+use crate::client::SubscriptionGuard;
 use crate::errors::OxiaError;
 use crate::key;
 use crate::types::{GetResult, Notification};
@@ -180,14 +181,15 @@ impl fmt::Debug for RangeScanStream {
 /// survives connection loss: each per-shard listener reconnects and resumes
 /// from its last delivered offset. Dropping the handle releases the
 /// subscription.
-#[derive(Debug)]
 pub struct Notifications {
     rx: mpsc::Receiver<Notification>,
+    // Stops the per-shard listeners when this handle is dropped.
+    _guard: SubscriptionGuard,
 }
 
 impl Notifications {
-    pub(crate) fn new(rx: mpsc::Receiver<Notification>) -> Self {
-        Notifications { rx }
+    pub(crate) fn new(rx: mpsc::Receiver<Notification>, guard: SubscriptionGuard) -> Self {
+        Notifications { rx, _guard: guard }
     }
 
     /// Receives the next notification.
@@ -196,6 +198,12 @@ impl Notifications {
     /// returned future loses no notification.
     pub async fn recv(&mut self) -> Option<Notification> {
         self.rx.recv().await
+    }
+}
+
+impl fmt::Debug for Notifications {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Notifications").finish_non_exhaustive()
     }
 }
 
@@ -215,14 +223,15 @@ impl Stream for Notifications {
 /// key. The subscription survives connection loss and re-subscribes
 /// automatically. Consume it with [`recv`](SequenceUpdates::recv) or as a
 /// [`Stream`]; dropping the handle releases the subscription.
-#[derive(Debug)]
 pub struct SequenceUpdates {
     rx: mpsc::Receiver<String>,
+    // Stops the listener when this handle is dropped.
+    _guard: SubscriptionGuard,
 }
 
 impl SequenceUpdates {
-    pub(crate) fn new(rx: mpsc::Receiver<String>) -> Self {
-        SequenceUpdates { rx }
+    pub(crate) fn new(rx: mpsc::Receiver<String>, guard: SubscriptionGuard) -> Self {
+        SequenceUpdates { rx, _guard: guard }
     }
 
     /// Receives the next sequence key.
@@ -231,6 +240,12 @@ impl SequenceUpdates {
     /// returned future loses no update.
     pub async fn recv(&mut self) -> Option<String> {
         self.rx.recv().await
+    }
+}
+
+impl fmt::Debug for SequenceUpdates {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SequenceUpdates").finish_non_exhaustive()
     }
 }
 

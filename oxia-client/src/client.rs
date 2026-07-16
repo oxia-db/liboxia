@@ -26,10 +26,10 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use futures::future::try_join_all;
 use std::fmt;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tracing::warn;
 
@@ -39,11 +39,43 @@ pub(crate) struct Inner {
     pub(crate) shard_manager: Arc<ShardManager>,
     pub(crate) session_manager: Arc<SessionManager>,
     batcher_deps: Arc<BatcherDeps>,
-    notification_tasks: Mutex<Vec<NotificationManager>>,
-    sequence_tasks: Mutex<Vec<SequenceUpdatesManager>>,
+    notification_managers: DashMap<u64, NotificationManager>,
+    sequence_managers: DashMap<u64, SequenceUpdatesManager>,
+    next_subscription_id: AtomicU64,
     write_batchers: DashMap<i64, Arc<WriteBatcher>>,
     read_batchers: DashMap<i64, Arc<ReadBatcher>>,
     closed: AtomicBool,
+}
+
+/// Which registry a [`SubscriptionGuard`] cleans up.
+enum SubscriptionKind {
+    Notification,
+    Sequence,
+}
+
+/// Held by a [`Notifications`]/[`SequenceUpdates`] handle; on drop it removes
+/// the backing manager from the client, stopping its listener task(s). A [`Weak`]
+/// reference means a dropped handle after the client is gone is a no-op.
+pub(crate) struct SubscriptionGuard {
+    inner: Weak<Inner>,
+    id: u64,
+    kind: SubscriptionKind,
+}
+
+impl Drop for SubscriptionGuard {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        match self.kind {
+            SubscriptionKind::Notification => {
+                inner.notification_managers.remove(&self.id);
+            }
+            SubscriptionKind::Sequence => {
+                inner.sequence_managers.remove(&self.id);
+            }
+        }
+    }
 }
 
 /// The Oxia client.
@@ -146,8 +178,9 @@ impl OxiaClient {
                 shard_manager,
                 session_manager,
                 batcher_deps,
-                notification_tasks: Mutex::new(Vec::new()),
-                sequence_tasks: Mutex::new(Vec::new()),
+                notification_managers: DashMap::new(),
+                sequence_managers: DashMap::new(),
+                next_subscription_id: AtomicU64::new(0),
                 write_batchers: DashMap::new(),
                 read_batchers: DashMap::new(),
                 closed: AtomicBool::new(false),
@@ -486,11 +519,27 @@ impl OxiaClient {
                 track(&mut first_err, batcher.close().await, "read batcher");
             }
         }
-        for manager in self.inner.notification_tasks.lock().await.drain(..) {
-            track(&mut first_err, manager.shutdown().await, "notifications");
+        let notification_ids: Vec<u64> = self
+            .inner
+            .notification_managers
+            .iter()
+            .map(|e| *e.key())
+            .collect();
+        for id in notification_ids {
+            if let Some((_, manager)) = self.inner.notification_managers.remove(&id) {
+                track(&mut first_err, manager.shutdown().await, "notifications");
+            }
         }
-        for manager in self.inner.sequence_tasks.lock().await.drain(..) {
-            track(&mut first_err, manager.shutdown().await, "sequence updates");
+        let sequence_ids: Vec<u64> = self
+            .inner
+            .sequence_managers
+            .iter()
+            .map(|e| *e.key())
+            .collect();
+        for id in sequence_ids {
+            if let Some((_, manager)) = self.inner.sequence_managers.remove(&id) {
+                track(&mut first_err, manager.shutdown().await, "sequence updates");
+            }
         }
         track(
             &mut first_err,
@@ -857,14 +906,36 @@ impl OxiaClient {
         buffer_size: usize,
     ) -> Result<Notifications, OxiaError> {
         self.ensure_open()?;
+        let shards = self.inner.shard_manager.get_shard_ids();
+        let shard_count = shards.len();
         let (tx, rx) = mpsc::channel(buffer_size);
+        let (init_tx, mut init_rx) = mpsc::channel(shard_count.max(1));
         let manager = NotificationManager::new(
+            shards,
             self.inner.shard_manager.clone(),
             self.inner.provider_manager.clone(),
             tx,
+            init_tx,
         );
-        self.inner.notification_tasks.lock().await.push(manager);
-        Ok(Notifications::new(rx))
+        // Make the subscription live before returning, so no change in the
+        // window between here and the first stream is missed. Returning early
+        // (on error/timeout) drops `manager`, cancelling every listener.
+        let deadline = tokio::time::Instant::now() + self.request_timeout();
+        let mut ready = 0;
+        while ready < shard_count {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, init_rx.recv()).await {
+                Ok(Some(Ok(()))) => ready += 1,
+                Ok(Some(Err(err))) => return Err(err),
+                Ok(None) => break,
+                Err(_) => return Err(OxiaError::Timeout),
+            }
+        }
+        let id = self.register_notification_manager(manager);
+        Ok(Notifications::new(
+            rx,
+            self.subscription_guard(id, SubscriptionKind::Notification),
+        ))
     }
 
     pub(crate) async fn open_sequence_updates(
@@ -882,8 +953,36 @@ impl OxiaClient {
             self.inner.provider_manager.clone(),
             tx,
         );
-        self.inner.sequence_tasks.lock().await.push(manager);
-        Ok(SequenceUpdates::new(rx))
+        let id = self
+            .inner
+            .next_subscription_id
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner.sequence_managers.insert(id, manager);
+        Ok(SequenceUpdates::new(
+            rx,
+            self.subscription_guard(id, SubscriptionKind::Sequence),
+        ))
+    }
+
+    /// Registers a live notification manager so [`close`](Self::close) can shut
+    /// it down, returning the id used to remove it when its handle is dropped.
+    fn register_notification_manager(&self, manager: NotificationManager) -> u64 {
+        let id = self
+            .inner
+            .next_subscription_id
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner.notification_managers.insert(id, manager);
+        id
+    }
+
+    /// Builds the guard a subscription handle holds; dropping the handle removes
+    /// (and thereby stops) the registered manager.
+    fn subscription_guard(&self, id: u64, kind: SubscriptionKind) -> SubscriptionGuard {
+        SubscriptionGuard {
+            inner: Arc::downgrade(&self.inner),
+            id,
+            kind,
+        }
     }
 
     /// Broadcasts a delete-range to every shard, re-issuing against the current
