@@ -201,6 +201,10 @@ impl OxiaClient {
     /// # Errors
     ///
     /// Awaiting the builder returns:
+    /// - [`OxiaError::InvalidArgument`] when
+    ///   [`sequence_key_deltas`](PutBuilder::sequence_key_deltas) is used
+    ///   without a partition key, with a zero delta, or together with an
+    ///   expected version;
     /// - [`OxiaError::UnexpectedVersionId`] when a
     ///   [`expected_version_id`](PutBuilder::expected_version_id) /
     ///   [`expected_record_not_exists`](PutBuilder::expected_record_not_exists)
