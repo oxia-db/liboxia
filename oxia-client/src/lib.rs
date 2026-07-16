@@ -4,6 +4,10 @@
 //! The entry point is [`OxiaClient`]. Every operation returns a request builder:
 //! chain options onto it and `.await` it directly.
 //!
+//! The [Oxia documentation site](https://oxia-db.github.io/) carries the full
+//! concept guide and side-by-side examples for every language SDK; this page is
+//! the Rust quick reference and API index.
+//!
 //! ```no_run
 //! use oxia::{ComparisonType, OxiaClient};
 //!
@@ -34,24 +38,67 @@
 //!
 //! # Concepts
 //!
-//! - **Records** are key/value pairs with a [`Version`] carrying the record's
-//!   version id and timestamps; conditional operations
+//! Each concept links to its Rust entry point and to the matching guide on the
+//! [Oxia docs site](https://oxia-db.github.io/), which covers it in depth and
+//! shows the equivalent in every other SDK.
+//!
+//! - **Records & versioning** — key/value pairs carry a [`Version`] (version id
+//!   and timestamps); conditional operations
 //!   ([`expected_version_id`](PutBuilder::expected_version_id)) implement
 //!   compare-and-swap.
-//! - **Ephemeral records** ([`PutBuilder::ephemeral`]) live as long as the
-//!   client's session and are removed automatically when it closes or expires.
-//! - **Partition keys** ([`PutBuilder::partition_key`]) co-locate related
-//!   records on one shard, enabling atomic multi-record batches and
-//!   server-generated **sequential keys**
-//!   ([`PutBuilder::sequence_key_deltas`], [`OxiaClient::sequence_updates`]).
-//! - **Secondary indexes** ([`PutBuilder::secondary_index`]) provide alternate
-//!   query paths for gets, lists and scans
-//!   ([`GetBuilder::use_index`], [`ListBuilder::use_index`]).
-//! - **Notifications** ([`OxiaClient::notifications`]) stream every change
-//!   applied to the database.
+//!   ([guide](https://oxia-db.github.io/docs/features/versioning))
+//! - **Sharding** — keys route to shards by hash; the client tracks assignments
+//!   and transparently re-routes operations across shard splits and merges.
+//!   ([guide](https://oxia-db.github.io/docs/architecture/logical-architecture))
+//! - **Sessions & ephemeral records** — [`ephemeral`](PutBuilder::ephemeral)
+//!   records live as long as the client's session and are removed when it closes
+//!   or expires; the session is kept alive and re-created transparently.
+//!   ([guide](https://oxia-db.github.io/docs/features/ephemerals))
+//! - **Partition keys** ([`partition_key`](PutBuilder::partition_key)) co-locate
+//!   related records on one shard, enabling atomic multi-record batches.
+//!   ([guide](https://oxia-db.github.io/docs/features/partition-keys))
+//! - **Sequential keys** — the server appends a monotonic, zero-padded suffix
+//!   per delta ([`sequence_key_deltas`](PutBuilder::sequence_key_deltas)); follow
+//!   advances with [`sequence_updates`](OxiaClient::sequence_updates).
+//!   ([guide](https://oxia-db.github.io/docs/features/sequence-keys))
+//! - **Secondary indexes** ([`secondary_index`](PutBuilder::secondary_index))
+//!   add alternate query paths for gets, lists and scans
+//!   ([`use_index`](GetBuilder::use_index)).
+//!   ([guide](https://oxia-db.github.io/docs/features/secondary-indexes))
+//! - **Notifications** ([`notifications`](OxiaClient::notifications)) stream
+//!   every change applied to the database.
+//!   ([guide](https://oxia-db.github.io/docs/features/notifications))
 //!
-//! Keys are sorted with Oxia's slash-aware order (`/`-separated path segments),
-//! not plain lexicographic order; range boundaries follow it.
+//! Keys use Oxia's slash-aware order (`/`-separated path segments), not plain
+//! lexicographic order; range boundaries follow it.
+//! ([guide](https://oxia-db.github.io/docs/features/oxia-key-sorting))
+//!
+//! # Options
+//!
+//! Configure the client with [`OxiaClientBuilder`]:
+//! [`namespace`](OxiaClientBuilder::namespace),
+//! [`request_timeout`](OxiaClientBuilder::request_timeout),
+//! [`session_timeout`](OxiaClientBuilder::session_timeout) /
+//! [`session_keep_alive`](OxiaClientBuilder::session_keep_alive),
+//! [`identity`](OxiaClientBuilder::identity), and the batching limits
+//! ([`batch_max_size`](OxiaClientBuilder::batch_max_size),
+//! [`max_requests_per_batch`](OxiaClientBuilder::max_requests_per_batch),
+//! [`max_write_batches_in_flight`](OxiaClientBuilder::max_write_batches_in_flight),
+//! [`max_read_batches_in_flight`](OxiaClientBuilder::max_read_batches_in_flight)).
+//! Every default is documented on the builder.
+//!
+//! Per-operation options chain onto the request builder before `.await`:
+//!
+//! | Operation | Options |
+//! |-----------|---------|
+//! | [`put`](OxiaClient::put) | [`expected_version_id`](PutBuilder::expected_version_id), [`expected_record_not_exists`](PutBuilder::expected_record_not_exists), [`partition_key`](PutBuilder::partition_key), [`sequence_key_deltas`](PutBuilder::sequence_key_deltas), [`secondary_index`](PutBuilder::secondary_index), [`ephemeral`](PutBuilder::ephemeral) |
+//! | [`get`](OxiaClient::get) | [`comparison`](GetBuilder::comparison), [`partition_key`](GetBuilder::partition_key), [`include_value`](GetBuilder::include_value), [`use_index`](GetBuilder::use_index) |
+//! | [`delete`](OxiaClient::delete) | [`expected_version_id`](DeleteBuilder::expected_version_id), [`partition_key`](DeleteBuilder::partition_key) |
+//! | [`delete_range`](OxiaClient::delete_range) | [`partition_key`](DeleteRangeBuilder::partition_key) |
+//! | [`list`](OxiaClient::list) | [`partition_key`](ListBuilder::partition_key), [`use_index`](ListBuilder::use_index), [`stream`](ListBuilder::stream) |
+//! | [`range_scan`](OxiaClient::range_scan) | [`partition_key`](RangeScanBuilder::partition_key), [`use_index`](RangeScanBuilder::use_index), [`stream`](RangeScanBuilder::stream) |
+//! | [`notifications`](OxiaClient::notifications) | [`buffer_size`](NotificationsBuilder::buffer_size) |
+//! | [`sequence_updates`](OxiaClient::sequence_updates) | [`buffer_size`](SequenceUpdatesBuilder::buffer_size) |
 //!
 //! # Error handling
 //!
@@ -78,6 +125,12 @@
 //! operation already submitted to a batch; it may still execute on the
 //! server. The `recv` methods on [`Notifications`] and [`SequenceUpdates`]
 //! are cancel-safe.
+//!
+//! # Cargo features
+//!
+//! This crate exposes no optional Cargo features; all functionality is always
+//! compiled in. (TLS, token authentication, and OpenTelemetry metrics are
+//! planned, and will be documented here when they land.)
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
