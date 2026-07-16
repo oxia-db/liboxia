@@ -1,1 +1,0 @@
-pub const CODE_SESSION_NOT_FOUND: i32 = 108;

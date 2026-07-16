@@ -100,16 +100,25 @@ impl OxiaError {
     /// Whether retrying the operation that produced this error might succeed.
     ///
     /// Mirrors the retryable set of the reference Go client: connection loss,
-    /// missing shard leaders / assignments, and the `UNAVAILABLE` / `ABORTED`
-    /// gRPC codes. Semantic results (e.g. [`KeyNotFound`](OxiaError::KeyNotFound))
-    /// and terminal failures are not retryable.
+    /// missing shard leaders / assignments, and the `UNAVAILABLE` / `ABORTED` /
+    /// `CANCELLED` gRPC codes (the last being a shutting-down server's own
+    /// cancellation propagating). Semantic results (e.g.
+    /// [`KeyNotFound`](OxiaError::KeyNotFound)) and terminal failures are not
+    /// retryable.
     pub fn is_retryable(&self) -> bool {
         match self {
             OxiaError::LeaderNotFound { .. }
             | OxiaError::NoShardForKey { .. }
             | OxiaError::Disconnected(_) => true,
             OxiaError::Grpc { code, .. } => {
-                matches!(code, tonic::Code::Unavailable | tonic::Code::Aborted)
+                // `Cancelled` here is the *server's* context cancellation
+                // propagating while it shuts down or drops a connection — the
+                // client never cancels these RPCs itself — so like the other
+                // two it signals a server that may come right back.
+                matches!(
+                    code,
+                    tonic::Code::Unavailable | tonic::Code::Aborted | tonic::Code::Cancelled
+                )
             }
             _ => false,
         }
@@ -118,6 +127,14 @@ impl OxiaError {
 
 impl From<tonic::Status> for OxiaError {
     fn from(status: tonic::Status) -> Self {
+        // tonic reports client-side transport failures (broken connection,
+        // h2 errors) as code `Unknown` with a local error source, unlike
+        // grpc-go which uses `Unavailable` for the same events. A status the
+        // *server* sent has no local source. Map the transport case to
+        // `Disconnected` so it classifies as retryable, like in Go.
+        if status.code() == tonic::Code::Unknown && std::error::Error::source(&status).is_some() {
+            return OxiaError::Disconnected(format!("transport error: {}", status.message()));
+        }
         OxiaError::Grpc {
             code: status.code(),
             message: status.message().to_string(),
@@ -151,6 +168,13 @@ mod tests {
         assert!(
             OxiaError::Grpc {
                 code: tonic::Code::Aborted,
+                message: msg.clone(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            OxiaError::Grpc {
+                code: tonic::Code::Cancelled,
                 message: msg.clone(),
             }
             .is_retryable()

@@ -12,7 +12,9 @@ use crate::requests::{
     DeleteBuilder, DeleteRangeBuilder, GetBuilder, ListBuilder, NotificationsBuilder, PutBuilder,
     RangeScanBuilder, SequenceUpdatesBuilder,
 };
+use crate::retry::retry_delay;
 use crate::sequence_updates_manager::SequenceUpdatesManager;
+use crate::server_error::{DecodedStatus, LeaderHint, decode_status};
 use crate::session_manager::SessionManager;
 use crate::shard_manager::{ShardManager, ShardManagerOptions};
 use crate::streams::{
@@ -668,18 +670,29 @@ impl OxiaClient {
         self.ensure_open()?;
         let opens = self.target_shards(partition_key)?.into_iter().map(|shard| {
             let client = self.clone();
-            let mut request = request.clone();
+            let request = request.clone();
             async move {
-                request.shard = Some(shard);
-                let mut provider = client.leader_provider(shard).await?;
-                let streaming = provider.list(request).await?.into_inner();
+                let (first, streaming) = client
+                    .open_streaming_with_retry(shard, move |mut provider| {
+                        let mut request = request.clone();
+                        request.shard = Some(shard);
+                        async move { provider.list(request).await }
+                    })
+                    .await?;
+                let head = first
+                    .map(|response: proto::ListResponse| {
+                        response.keys.into_iter().map(Ok).collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 let stream: ShardStream<String> = Box::pin(
-                    streaming
-                        .map(|chunk| match chunk {
-                            Ok(response) => response.keys.into_iter().map(Ok).collect(),
-                            Err(status) => vec![Err(OxiaError::from(status))],
-                        })
-                        .flat_map(futures::stream::iter),
+                    futures::stream::iter(head).chain(
+                        streaming
+                            .map(|chunk| match chunk {
+                                Ok(response) => response.keys.into_iter().map(Ok).collect(),
+                                Err(status) => vec![Err(OxiaError::from(status))],
+                            })
+                            .flat_map(futures::stream::iter),
+                    ),
                 );
                 Ok::<_, OxiaError>(stream)
             }
@@ -695,22 +708,32 @@ impl OxiaClient {
         self.ensure_open()?;
         let opens = self.target_shards(partition_key)?.into_iter().map(|shard| {
             let client = self.clone();
-            let mut request = request.clone();
+            let request = request.clone();
             async move {
-                request.shard = Some(shard);
-                let mut provider = client.leader_provider(shard).await?;
-                let streaming = provider.range_scan(request).await?.into_inner();
+                let (first, streaming) = client
+                    .open_streaming_with_retry(shard, move |mut provider| {
+                        let mut request = request.clone();
+                        request.shard = Some(shard);
+                        async move { provider.range_scan(request).await }
+                    })
+                    .await?;
+                let to_items = |response: proto::RangeScanResponse| {
+                    response
+                        .records
+                        .into_iter()
+                        .map(|record| GetResult::from_proto(record, None))
+                        .collect::<Vec<_>>()
+                };
+                let head = first.map(to_items).unwrap_or_default();
                 let stream: ShardStream<GetResult> = Box::pin(
-                    streaming
-                        .map(|chunk| match chunk {
-                            Ok(response) => response
-                                .records
-                                .into_iter()
-                                .map(|record| GetResult::from_proto(record, None))
-                                .collect(),
-                            Err(status) => vec![Err(OxiaError::from(status))],
-                        })
-                        .flat_map(futures::stream::iter),
+                    futures::stream::iter(head).chain(
+                        streaming
+                            .map(move |chunk| match chunk {
+                                Ok(response) => to_items(response),
+                                Err(status) => vec![Err(OxiaError::from(status))],
+                            })
+                            .flat_map(futures::stream::iter),
+                    ),
                 );
                 Ok::<_, OxiaError>(stream)
             }
@@ -718,20 +741,67 @@ impl OxiaClient {
         Ok(RangeScanStream::new(merged(try_join_all(opens).await?)))
     }
 
-    async fn leader_provider(
+    /// Opens a per-shard server stream, retrying — with backoff and leader
+    /// hints, bounded by the request timeout — until the first response (or a
+    /// clean end of stream) has been received. Past that point the caller
+    /// consumes the stream without retries, so results are never duplicated
+    /// (the reference client's "verified" pattern).
+    async fn open_streaming_with_retry<Resp, Fut>(
         &self,
         shard: i64,
-    ) -> Result<proto::oxia_client_client::OxiaClientClient<tonic::transport::Channel>, OxiaError>
+        call: impl Fn(proto::oxia_client_client::OxiaClientClient<tonic::transport::Channel>) -> Fut,
+    ) -> Result<(Option<Resp>, tonic::Streaming<Resp>), OxiaError>
+    where
+        Fut: Future<Output = Result<tonic::Response<tonic::Streaming<Resp>>, tonic::Status>>,
     {
-        let leader = self
-            .inner
-            .shard_manager
-            .get_leader(shard)
-            .ok_or(OxiaError::LeaderNotFound { shard })?;
-        self.inner
-            .provider_manager
-            .get_provider(leader.service_address)
-            .await
+        let deadline = tokio::time::Instant::now() + self.request_timeout();
+        let mut hint: Option<LeaderHint> = None;
+        let mut attempt: u32 = 0;
+        loop {
+            let outcome: Result<_, DecodedStatus> = async {
+                let target = match hint.as_ref().and_then(|h| h.address_for(shard)) {
+                    Some(address) => crate::address::ensure_protocol(address.to_string()),
+                    None => {
+                        self.inner
+                            .shard_manager
+                            .get_leader(shard)
+                            .ok_or_else(|| {
+                                DecodedStatus::from(OxiaError::LeaderNotFound { shard })
+                            })?
+                            .service_address
+                    }
+                };
+                let provider = self
+                    .inner
+                    .provider_manager
+                    .get_provider(target)
+                    .await
+                    .map_err(DecodedStatus::from)?;
+                let mut streaming = call(provider).await.map_err(decode_status)?.into_inner();
+                match streaming.next().await {
+                    Some(Ok(first)) => Ok((Some(first), streaming)),
+                    None => Ok((None, streaming)),
+                    Some(Err(status)) => Err(decode_status(status)),
+                }
+            }
+            .await;
+            match outcome {
+                Ok(opened) => return Ok(opened),
+                Err(decoded) => {
+                    if decoded.leader_hint.is_some() {
+                        hint = decoded.leader_hint;
+                    }
+                    let delay = retry_delay(attempt);
+                    attempt += 1;
+                    if !decoded.error.is_retryable()
+                        || tokio::time::Instant::now() + delay >= deadline
+                    {
+                        return Err(decoded.error);
+                    }
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
     }
 
     pub(crate) async fn open_notifications(
