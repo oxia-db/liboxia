@@ -243,6 +243,10 @@ impl OxiaClient {
     /// one. Records written with a partition key must be read with the same
     /// partition key.
     ///
+    /// An exact-match get is routed to the single shard that owns the key (or
+    /// the partition key, when given); an inequality comparison or a
+    /// secondary-index lookup instead fans out across all shards.
+    ///
     /// # Errors
     ///
     /// Awaiting the builder returns:
@@ -697,8 +701,10 @@ impl OxiaClient {
     }
 
     /// Runs a get against every shard and reduces the per-shard winners
-    /// according to the comparison type (used when no partition key pins the
-    /// query to one shard).
+    /// according to the comparison type. Used only when the query is not pinned
+    /// to a single shard — i.e. an inequality comparison or a secondary-index
+    /// lookup with no partition key; an exact-match primary-key get is routed
+    /// directly to its owning shard instead.
     pub(crate) async fn broadcast_get(
         &self,
         request: proto::GetRequest,
