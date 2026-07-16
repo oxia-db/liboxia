@@ -8,14 +8,13 @@ see the Oxia [Code of Conduct](https://github.com/oxia-db/oxia/blob/main/CODE_OF
 
 - **Rust 1.85+** (edition 2024) — install via [rustup](https://rustup.rs). 1.85 is the MSRV;
   please don't use features that raise it.
-- **protoc** — the Protocol Buffers compiler. The client generates gRPC code from `.proto`
-  files at build time.
-  - Debian/Ubuntu: `sudo apt-get install -y protobuf-compiler`
-  - macOS: `brew install protobuf`
 - **CMake** — required by a native build dependency. This repo pins it with
   [mise](https://mise.jdx.dev): run `mise install` in the repo root, or install CMake yourself.
 - **Docker** — the integration and interop tests start a real Oxia server in a container
   (`oxia/oxia:main`). Docker must be running to execute them.
+
+No `protoc` is required: the gRPC code is generated at build time from the `.proto`
+sources with the pure-Rust [`protox`](https://crates.io/crates/protox) compiler.
 
 ## Building and testing
 

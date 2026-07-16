@@ -19,9 +19,6 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -72,10 +69,6 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "::notice::oxia-client is not on crates.io yet (HTTP $code); skipping semver check until the first release."
           fi
-
-      - name: Install protobuf compiler
-        if: steps.baseline.outputs.exists == 'true'
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: cargo semver-checks
         if: steps.baseline.outputs.exists == 'true'
