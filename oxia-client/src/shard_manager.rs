@@ -279,6 +279,16 @@ impl ShardManager {
     }
 
     /// The ids of all shards in the namespace, per the current assignments.
+    /// Whether the shard is present in the current assignments (false once it
+    /// has been split or merged away).
+    pub fn shard_exists(&self, shard_id: i64) -> bool {
+        self.inner
+            .assignments
+            .load()
+            .leaders
+            .contains_key(&shard_id)
+    }
+
     pub fn get_shard_ids(&self) -> Vec<i64> {
         self.inner
             .assignments

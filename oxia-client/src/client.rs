@@ -12,7 +12,7 @@ use crate::requests::{
     DeleteBuilder, DeleteRangeBuilder, GetBuilder, ListBuilder, NotificationsBuilder, PutBuilder,
     RangeScanBuilder, SequenceUpdatesBuilder,
 };
-use crate::retry::retry_delay;
+use crate::retry::{retry_delay, retry_until};
 use crate::sequence_updates_manager::SequenceUpdatesManager;
 use crate::server_error::{DecodedStatus, LeaderHint, decode_status};
 use crate::session_manager::SessionManager;
@@ -540,6 +540,47 @@ impl OxiaClient {
         self.inner.session_manager.get_session_id(shard).await
     }
 
+    /// Runs `attempt` against the shard that owns `routing_key`, re-resolving
+    /// the shard and retrying (backoff, bounded by the request timeout) while
+    /// routing is unavailable — `NoShardForKey` (assignments not loaded yet) or
+    /// `ShardMoved` (the shard just split or merged). This is how an operation
+    /// re-routes to the new shard after a split/merge.
+    pub(crate) async fn with_shard_retry<T, F, Fut>(
+        &self,
+        routing_key: &str,
+        attempt: F,
+    ) -> Result<T, OxiaError>
+    where
+        F: Fn(i64) -> Fut,
+        Fut: std::future::Future<Output = Result<T, OxiaError>>,
+    {
+        retry_until(
+            self.request_timeout(),
+            |err| matches!(err, OxiaError::ShardMoved | OxiaError::NoShardForKey { .. }),
+            || async {
+                let shard = self.shard_for(routing_key)?;
+                attempt(shard).await
+            },
+        )
+        .await
+    }
+
+    /// Retries `op` while it fails with `ShardMoved` — for whole-operation
+    /// re-routing (broadcasts) where a single failing shard means the shard set
+    /// changed and the operation must be re-issued against the new set.
+    pub(crate) async fn with_reroute_retry<T, F, Fut>(&self, op: F) -> Result<T, OxiaError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, OxiaError>>,
+    {
+        retry_until(
+            self.request_timeout(),
+            |err| matches!(err, OxiaError::ShardMoved),
+            op,
+        )
+        .await
+    }
+
     /// Returns (creating on first use) the write batcher for a shard.
     fn write_batcher(&self, shard_id: i64) -> Arc<WriteBatcher> {
         self.inner
@@ -614,43 +655,50 @@ impl OxiaClient {
         request: proto::GetRequest,
         comparison: ComparisonType,
     ) -> Result<GetResult, OxiaError> {
-        let mut join_set = JoinSet::new();
-        for shard in self.inner.shard_manager.get_shard_ids() {
-            let client = self.clone();
+        // Re-issue against the current shard set if a shard splits mid-flight.
+        self.with_reroute_retry(|| {
             let request = request.clone();
-            join_set.spawn(async move {
-                let requested_key = request.key.clone();
-                let response = client.submit_get(shard, request).await?;
-                check_status(response.status)?;
-                GetResult::from_proto(response, Some(requested_key))
-            });
-        }
-        let mut best: Option<GetResult> = None;
-        let mut join_error: Option<OxiaError> = None;
-        while let Some(joined) = join_set.join_next().await {
-            let result = match joined {
-                Ok(result) => result,
-                Err(err) => {
-                    join_error = Some(OxiaError::Disconnected(err.to_string()));
-                    continue;
+            async move {
+                let mut join_set = JoinSet::new();
+                for shard in self.inner.shard_manager.get_shard_ids() {
+                    let client = self.clone();
+                    let request = request.clone();
+                    join_set.spawn(async move {
+                        let requested_key = request.key.clone();
+                        let response = client.submit_get(shard, request).await?;
+                        check_status(response.status)?;
+                        GetResult::from_proto(response, Some(requested_key))
+                    });
                 }
-            };
-            match result {
-                Ok(candidate) => {
-                    best = Some(match best.take() {
-                        None => candidate,
-                        Some(current) => pick_get_winner(current, candidate, comparison),
-                    })
+                let mut best: Option<GetResult> = None;
+                let mut join_error: Option<OxiaError> = None;
+                while let Some(joined) = join_set.join_next().await {
+                    let result = match joined {
+                        Ok(result) => result,
+                        Err(err) => {
+                            join_error = Some(OxiaError::Disconnected(err.to_string()));
+                            continue;
+                        }
+                    };
+                    match result {
+                        Ok(candidate) => {
+                            best = Some(match best.take() {
+                                None => candidate,
+                                Some(current) => pick_get_winner(current, candidate, comparison),
+                            })
+                        }
+                        // Not every shard has a matching record.
+                        Err(OxiaError::KeyNotFound) => {}
+                        Err(err) => return Err(err),
+                    }
                 }
-                // Not every shard has a matching record.
-                Err(OxiaError::KeyNotFound) => {}
-                Err(err) => return Err(err),
+                if let Some(err) = join_error {
+                    return Err(err);
+                }
+                best.ok_or(OxiaError::KeyNotFound)
             }
-        }
-        if let Some(err) = join_error {
-            return Err(err);
-        }
-        best.ok_or(OxiaError::KeyNotFound)
+        })
+        .await
     }
 
     /// Resolves the target shards for a list/scan: either the single shard
@@ -838,26 +886,33 @@ impl OxiaClient {
         Ok(SequenceUpdates::new(rx))
     }
 
-    /// Broadcasts a delete-range to every shard.
+    /// Broadcasts a delete-range to every shard, re-issuing against the current
+    /// shard set if one splits or merges mid-flight (idempotent).
     pub(crate) async fn broadcast_delete_range(
         &self,
         request: proto::DeleteRangeRequest,
     ) -> Result<(), OxiaError> {
-        let mut join_set = JoinSet::new();
-        for shard in self.inner.shard_manager.get_shard_ids() {
-            let client = self.clone();
+        self.with_reroute_retry(|| {
             let request = request.clone();
-            join_set.spawn(async move {
-                let response = client
-                    .submit_write(shard, request, WriteOp::DeleteRange)
-                    .await?;
-                check_status(response.status)
-            });
-        }
-        while let Some(joined) = join_set.join_next().await {
-            joined.map_err(|err| OxiaError::Disconnected(err.to_string()))??;
-        }
-        Ok(())
+            async move {
+                let mut join_set = JoinSet::new();
+                for shard in self.inner.shard_manager.get_shard_ids() {
+                    let client = self.clone();
+                    let request = request.clone();
+                    join_set.spawn(async move {
+                        let response = client
+                            .submit_write(shard, request, WriteOp::DeleteRange)
+                            .await?;
+                        check_status(response.status)
+                    });
+                }
+                while let Some(joined) = join_set.join_next().await {
+                    joined.map_err(|err| OxiaError::Disconnected(err.to_string()))??;
+                }
+                Ok(())
+            }
+        })
+        .await
     }
 }
 

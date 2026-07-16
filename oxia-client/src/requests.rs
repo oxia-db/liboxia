@@ -99,26 +99,55 @@ impl PutBuilder {
     async fn execute(self) -> Result<PutResult, OxiaError> {
         let client = self.client;
         client.ensure_open()?;
-        let routing_key = self.partition_key.as_deref().unwrap_or(&self.key);
-        let shard = client.shard_for(routing_key)?;
-        let session_id = if self.ephemeral {
-            Some(client.session_id_for(shard).await?)
-        } else {
-            None
-        };
-        let request = proto::PutRequest {
-            key: self.key.clone(),
-            value: self.value,
-            expected_version_id: self.expected_version_id,
-            session_id,
-            client_identity: Some(client.identity().to_string()),
-            partition_key: self.partition_key,
-            sequence_key_delta: self.sequence_key_deltas,
-            secondary_indexes: self.secondary_indexes,
-            override_version_id: None,
-            override_modifications_count: None,
-        };
-        let response = client.submit_write(shard, request, WriteOp::Put).await?;
+        let routing_key = self
+            .partition_key
+            .as_deref()
+            .unwrap_or(&self.key)
+            .to_string();
+        let PutBuilder {
+            key,
+            value,
+            expected_version_id,
+            partition_key,
+            sequence_key_deltas,
+            secondary_indexes,
+            ephemeral,
+            ..
+        } = self;
+        let identity = client.identity().to_string();
+        // Re-resolve the shard and (for ephemeral puts) its session on each
+        // attempt, so a split/merge re-routes to the new shard.
+        let response = client
+            .with_shard_retry(&routing_key, |shard| {
+                let client = client.clone();
+                let key = key.clone();
+                let value = value.clone();
+                let partition_key = partition_key.clone();
+                let sequence_key_deltas = sequence_key_deltas.clone();
+                let secondary_indexes = secondary_indexes.clone();
+                let identity = identity.clone();
+                async move {
+                    let session_id = if ephemeral {
+                        Some(client.session_id_for(shard).await?)
+                    } else {
+                        None
+                    };
+                    let request = proto::PutRequest {
+                        key,
+                        value,
+                        expected_version_id,
+                        session_id,
+                        client_identity: Some(identity),
+                        partition_key,
+                        sequence_key_delta: sequence_key_deltas,
+                        secondary_indexes,
+                        override_version_id: None,
+                        override_modifications_count: None,
+                    };
+                    client.submit_write(shard, request, WriteOp::Put).await
+                }
+            })
+            .await?;
         check_status(response.status)?;
         let version = response
             .version
@@ -126,7 +155,7 @@ impl PutBuilder {
         Ok(PutResult {
             // The server returns the key only when it generated it
             // (sequential keys).
-            key: response.key.unwrap_or(self.key),
+            key: response.key.unwrap_or(key),
             version: version.into(),
         })
     }
@@ -204,8 +233,13 @@ impl GetBuilder {
         };
         match self.partition_key {
             Some(partition_key) => {
-                let shard = client.shard_for(&partition_key)?;
-                let response = client.submit_get(shard, request).await?;
+                let response = client
+                    .with_shard_retry(&partition_key, |shard| {
+                        let client = client.clone();
+                        let request = request.clone();
+                        async move { client.submit_get(shard, request).await }
+                    })
+                    .await?;
                 check_status(response.status)?;
                 GetResult::from_proto(response, Some(self.key))
             }
@@ -262,13 +296,22 @@ impl DeleteBuilder {
     async fn execute(self) -> Result<(), OxiaError> {
         let client = self.client;
         client.ensure_open()?;
-        let routing_key = self.partition_key.as_deref().unwrap_or(&self.key);
-        let shard = client.shard_for(routing_key)?;
+        let routing_key = self
+            .partition_key
+            .as_deref()
+            .unwrap_or(&self.key)
+            .to_string();
         let request = proto::DeleteRequest {
             key: self.key,
             expected_version_id: self.expected_version_id,
         };
-        let response = client.submit_write(shard, request, WriteOp::Delete).await?;
+        let response = client
+            .with_shard_retry(&routing_key, |shard| {
+                let client = client.clone();
+                let request = request.clone();
+                async move { client.submit_write(shard, request, WriteOp::Delete).await }
+            })
+            .await?;
         check_status(response.status)
     }
 }
@@ -323,9 +366,16 @@ impl DeleteRangeBuilder {
         };
         match self.partition_key {
             Some(partition_key) => {
-                let shard = client.shard_for(&partition_key)?;
                 let response = client
-                    .submit_write(shard, request, WriteOp::DeleteRange)
+                    .with_shard_retry(&partition_key, |shard| {
+                        let client = client.clone();
+                        let request = request.clone();
+                        async move {
+                            client
+                                .submit_write(shard, request, WriteOp::DeleteRange)
+                                .await
+                        }
+                    })
                     .await?;
                 check_status(response.status)
             }

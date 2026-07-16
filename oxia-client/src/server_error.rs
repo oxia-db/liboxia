@@ -14,6 +14,7 @@ const OXIA_ERROR_DOMAIN: &str = "oxia.io";
 const METADATA_SHARD: &str = "shard";
 const METADATA_LEADER: &str = "leader";
 const REASON_SESSION_NOT_FOUND: &str = "SESSION_NOT_FOUND";
+const REASON_SHARD_NOT_FOUND: &str = "SHARD_NOT_FOUND";
 
 /// The address of a shard's current leader, extracted from an error's details.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +76,8 @@ pub(crate) fn decode_status(status: Status) -> DecodedStatus {
 
     let error = match info.reason.as_str() {
         REASON_SESSION_NOT_FOUND => OxiaError::SessionExpired,
+        // A split/merged shard: the operation re-routes to the new shard.
+        REASON_SHARD_NOT_FOUND => OxiaError::ShardMoved,
         _ => OxiaError::from(status),
     };
 
@@ -129,6 +132,14 @@ mod tests {
         assert_eq!(hint.leader, "server-2:6648");
         assert_eq!(hint.address_for(7), Some("server-2:6648"));
         assert_eq!(hint.address_for(8), None);
+    }
+
+    #[test]
+    fn shard_not_found_reason_maps_to_shard_moved() {
+        let status = oxia_status(Code::NotFound, "SHARD_NOT_FOUND", HashMap::new());
+        let decoded = decode_status(status);
+        assert!(matches!(decoded.error, OxiaError::ShardMoved));
+        assert!(decoded.error.is_retryable());
     }
 
     #[test]

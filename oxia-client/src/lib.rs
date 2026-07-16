@@ -64,7 +64,8 @@
 //! [`OxiaClient`] documents the errors it can produce.
 //!
 //! The client retries retryable failures internally — re-routing via the
-//! leader hints the server attaches to routing errors, with exponential
+//! leader hints the server attaches to routing errors, re-hashing operations
+//! onto the new shard when a shard is split or merged, with exponential
 //! backoff, bounded by the request timeout — so the errors you observe are
 //! post-retry. One consequence, shared with the reference clients: a write
 //! whose batch failed *after* reaching the wire may be retried even though the
