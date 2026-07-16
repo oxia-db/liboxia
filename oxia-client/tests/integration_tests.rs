@@ -2009,3 +2009,240 @@ async fn test_writes_survive_restart_under_concurrent_load() {
     }
     client.close().await.unwrap();
 }
+
+// ============================================================
+// Java-parity tests
+// ============================================================
+// These mirror scenarios covered by the Oxia Java client's integration tests
+// (io.oxia.client.it) that were not yet exercised here.
+
+/// A `delete_range` must surface as a single `KeyRangeDeleted` notification
+/// (start inclusive, end exclusive), not per-key deletions.
+/// Java: `NotificationIt.testDeleteRange`.
+#[tokio::test]
+async fn test_notification_key_range_deleted() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let mut rx = client.notifications().await.unwrap();
+
+    client.put("kr/a", b"1".to_vec()).await.unwrap();
+    client.put("kr/b", b"2".to_vec()).await.unwrap();
+
+    client.delete_range("kr/a", "kr/c").await.unwrap();
+
+    // Consume notifications until the range deletion arrives (the two creations
+    // above may come first).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut range_deleted = None;
+    while let Ok(Some(n)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        if let Notification::KeyRangeDeleted {
+            key,
+            key_range_last,
+        } = n
+        {
+            range_deleted = Some((key, key_range_last));
+            break;
+        }
+    }
+    let (key, key_range_last) =
+        range_deleted.expect("expected a KeyRangeDeleted notification for delete_range");
+    assert_eq!(key, "kr/a");
+    assert_eq!(key_range_last.as_deref(), Some("kr/c"));
+
+    client.close().await.unwrap();
+}
+
+/// `sequence_updates` streams the highest assigned sequence key as sequential
+/// puts advance it. Java: `OxiaClientIT.testGetSequenceUpdates`.
+#[tokio::test]
+async fn test_sequence_updates_stream() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let mut updates = client
+        .sequence_updates("seq-upd/events", "seq-upd-pk")
+        .await
+        .unwrap();
+
+    // Advance the sequence a few times.
+    let mut last_put_key = String::new();
+    for _ in 0..3 {
+        last_put_key = client
+            .put("seq-upd/events", b"e".to_vec())
+            .partition_key("seq-upd-pk")
+            .sequence_key_deltas(vec![1])
+            .await
+            .unwrap()
+            .key;
+    }
+
+    // The stream must report the highest sequence key (advances may coalesce, so
+    // read until it catches up to the last put).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut latest = None;
+    while let Ok(Some(key)) = tokio::time::timeout_at(deadline, updates.recv()).await {
+        let caught_up = key == last_put_key;
+        latest = Some(key);
+        if caught_up {
+            break;
+        }
+    }
+    assert_eq!(
+        latest.as_deref(),
+        Some(last_put_key.as_str()),
+        "sequence updates should report the highest key"
+    );
+
+    client.close().await.unwrap();
+}
+
+/// `get(...).use_index(...)` resolves a secondary-index value to its primary
+/// record, honoring the comparison type. Java: `OxiaClientIT.testSecondaryIndexGet`.
+#[tokio::test]
+async fn test_get_via_secondary_index() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    client
+        .put("sidx/user1", b"alice".to_vec())
+        .secondary_index("by-age", "030")
+        .await
+        .unwrap();
+    client
+        .put("sidx/user2", b"bob".to_vec())
+        .secondary_index("by-age", "040")
+        .await
+        .unwrap();
+
+    // Exact index lookup returns the primary record.
+    let exact = client.get("030").use_index("by-age").await.unwrap();
+    assert_eq!(exact.key, "sidx/user1");
+    assert_eq!(exact.value.as_deref(), Some(b"alice".as_ref()));
+    assert_eq!(exact.secondary_index_key.as_deref(), Some("030"));
+
+    // Ceiling from a value between the two index entries resolves to the next.
+    let ceiling = client
+        .get("035")
+        .use_index("by-age")
+        .comparison(ComparisonType::Ceiling)
+        .await
+        .unwrap();
+    assert_eq!(ceiling.key, "sidx/user2");
+    assert_eq!(ceiling.value.as_deref(), Some(b"bob".as_ref()));
+
+    client.delete_range("sidx/", "sidx/~").await.unwrap();
+    client.close().await.unwrap();
+}
+
+/// Building a client for a namespace the server does not serve must fail fast,
+/// not hang or return an empty routing table. Java: `OxiaClientFailFastIT.testWrongNamespace`.
+#[tokio::test]
+async fn build_fails_fast_on_wrong_namespace() {
+    let (_container, address) = start_oxia().await;
+
+    let build = OxiaClientBuilder::new()
+        .service_address(address)
+        .namespace("no-such-namespace")
+        .request_timeout(Duration::from_secs(5))
+        .build();
+
+    match tokio::time::timeout(Duration::from_secs(15), build).await {
+        Ok(Ok(_)) => panic!("build unexpectedly succeeded for a nonexistent namespace"),
+        // Failed fast with an error — the namespace error was surfaced.
+        Ok(Err(_)) => {}
+        Err(_) => panic!("build hung instead of failing fast on a bad namespace"),
+    }
+}
+
+/// Server-assigned sequence keys are the base key suffixed with zero-padded,
+/// 20-digit deltas (one segment per delta). Java: `OxiaClientIT.testSequentialKeys`.
+#[tokio::test]
+async fn test_sequence_key_format() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let single = client
+        .put("sfmt/events", b"e1".to_vec())
+        .partition_key("sfmt-pk")
+        .sequence_key_deltas(vec![1])
+        .await
+        .unwrap()
+        .key;
+    let suffix = single
+        .strip_prefix("sfmt/events-")
+        .unwrap_or_else(|| panic!("unexpected sequence key {single:?}"));
+    assert_eq!(suffix.len(), 20, "sequence segment must be 20 digits");
+    assert!(suffix.chars().all(|c| c.is_ascii_digit()));
+
+    // Multiple deltas produce one zero-padded segment each.
+    let multi = client
+        .put("sfmt/multi", b"m1".to_vec())
+        .partition_key("sfmt-pk")
+        .sequence_key_deltas(vec![1, 5])
+        .await
+        .unwrap()
+        .key;
+    let segments: Vec<&str> = multi
+        .strip_prefix("sfmt/multi-")
+        .unwrap_or_else(|| panic!("unexpected sequence key {multi:?}"))
+        .split('-')
+        .collect();
+    assert_eq!(segments.len(), 2, "expected two sequence segments");
+    for seg in segments {
+        assert_eq!(seg.len(), 20);
+        assert!(seg.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    client
+        .delete_range("sfmt/", "sfmt/~")
+        .partition_key("sfmt-pk")
+        .await
+        .unwrap();
+    client.close().await.unwrap();
+}
+
+/// A burst of concurrent sequential puts to one sequence must yield distinct,
+/// contiguous keys — none lost, none duplicated. Java: `OxiaClientIT.testSequenceBatching`.
+#[tokio::test]
+async fn test_sequence_batching_concurrent() {
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..50 {
+        let client = client.clone();
+        tasks.spawn(async move {
+            client
+                .put("sbatch/idx", b"v".to_vec())
+                .partition_key("sbatch-pk")
+                .sequence_key_deltas(vec![1])
+                .await
+                .map(|r| r.key)
+        });
+    }
+
+    let mut keys = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        keys.push(result.unwrap().unwrap());
+    }
+
+    keys.sort();
+    keys.dedup();
+    assert_eq!(keys.len(), 50, "expected 50 distinct sequence keys");
+
+    // The generated keys are contiguous: the same base with 50 distinct suffixes.
+    let listed = client
+        .list("sbatch/", "sbatch/~")
+        .partition_key("sbatch-pk")
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 50);
+
+    client
+        .delete_range("sbatch/", "sbatch/~")
+        .partition_key("sbatch-pk")
+        .await
+        .unwrap();
+    client.close().await.unwrap();
+}
