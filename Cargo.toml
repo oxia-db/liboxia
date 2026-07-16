@@ -1,7 +1,8 @@
 [workspace]
 members = [
     "oxia-client",
-    "oxia-client-ffi"
+    "oxia-client-ffi",
+    "oxia-perf"
 ]
 resolver = "2"
 
@@ -24,3 +25,6 @@ protox = "0.7"
 oxia-client = { path = "oxia-client" }
 libc = "0.2"
 futures = "0.3"
+clap = { version = "4", features = ["derive"] }
+hdrhistogram = "7"
+rand = "0.9"
