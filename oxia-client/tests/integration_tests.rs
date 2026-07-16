@@ -515,10 +515,9 @@ async fn test_notifications() {
     let (_container, address) = start_oxia().await;
     let client = new_client(&address).await;
 
+    // No warm-up sleep: `notifications()` only returns once every shard's
+    // subscription is live, so the changes below cannot race ahead of it.
     let mut notification_rx = client.notifications().await.unwrap();
-
-    // Give notification listener time to connect
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Create a key
     client
@@ -577,6 +576,61 @@ async fn test_notifications() {
     ));
 
     client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_notifications_live_on_return() {
+    // The subscription must be live the instant `notifications()` returns: a
+    // change made immediately afterwards, with no delay, is still delivered.
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let mut rx = client.notifications().await.unwrap();
+    client
+        .put("live/key".to_string(), b"v".to_vec())
+        .await
+        .unwrap();
+
+    let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("notification not delivered in time")
+        .expect("notification stream closed");
+    assert!(matches!(
+        got,
+        Notification::KeyCreated { key, .. } if key == "live/key"
+    ));
+
+    client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_notifications_drop_releases_subscription() {
+    // Dropping the handle stops its listeners and leaves the client healthy:
+    // a fresh subscription still works and shutdown completes promptly.
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let rx = client.notifications().await.unwrap();
+    drop(rx);
+
+    let mut rx2 = client.notifications().await.unwrap();
+    client
+        .put("drop/key".to_string(), b"v".to_vec())
+        .await
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(5), rx2.recv())
+        .await
+        .expect("notification not delivered in time")
+        .expect("notification stream closed");
+    assert!(matches!(
+        got,
+        Notification::KeyCreated { key, .. } if key == "drop/key"
+    ));
+
+    tokio::time::timeout(Duration::from_secs(5), client.close())
+        .await
+        .expect("close hung after dropping a subscription")
+        .unwrap();
 }
 
 // ============================================================
