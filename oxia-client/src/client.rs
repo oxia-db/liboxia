@@ -1,34 +1,35 @@
 //! The Oxia client: construction, per-operation execution, and shutdown.
 
-use crate::batch_manager::{BatchManager, Batcher, BatcherContext};
+use crate::batcher::{BatcherDeps, ReadBatcher, WriteBatcher, WriteOp, pending_write};
 use crate::client_builder::OxiaClientBuilder;
 use crate::client_options::OxiaClientOptions;
 use crate::errors::OxiaError;
 use crate::notification_manager::NotificationManager;
-use crate::operations::{Operation, Pending};
+use crate::operations::Pending;
 use crate::proto;
 use crate::provider_manager::ProviderManager;
 use crate::requests::{
     DeleteBuilder, DeleteRangeBuilder, GetBuilder, ListBuilder, NotificationsBuilder, PutBuilder,
     RangeScanBuilder, SequenceUpdatesBuilder,
 };
+use crate::retry::{retry_delay, retry_until};
 use crate::sequence_updates_manager::SequenceUpdatesManager;
+use crate::server_error::{DecodedStatus, LeaderHint, decode_status};
 use crate::session_manager::SessionManager;
 use crate::shard_manager::{ShardManager, ShardManagerOptions};
 use crate::streams::{
     ListStream, Notifications, RangeScanStream, SequenceUpdates, ShardStream, merged,
 };
 use crate::types::{ComparisonType, GetResult};
-use crate::write_stream_manager::WriteStreamManager;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::StreamExt;
 use futures::future::try_join_all;
 use std::fmt;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tracing::warn;
 
@@ -37,12 +38,44 @@ pub(crate) struct Inner {
     pub(crate) provider_manager: Arc<ProviderManager>,
     pub(crate) shard_manager: Arc<ShardManager>,
     pub(crate) session_manager: Arc<SessionManager>,
-    pub(crate) write_stream_manager: Arc<WriteStreamManager>,
-    notification_tasks: Mutex<Vec<NotificationManager>>,
-    sequence_tasks: Mutex<Vec<SequenceUpdatesManager>>,
-    write_batchers: DashMap<i64, Arc<BatchManager>>,
-    read_batchers: DashMap<i64, Arc<BatchManager>>,
+    batcher_deps: Arc<BatcherDeps>,
+    notification_managers: DashMap<u64, NotificationManager>,
+    sequence_managers: DashMap<u64, SequenceUpdatesManager>,
+    next_subscription_id: AtomicU64,
+    write_batchers: DashMap<i64, Arc<WriteBatcher>>,
+    read_batchers: DashMap<i64, Arc<ReadBatcher>>,
     closed: AtomicBool,
+}
+
+/// Which registry a [`SubscriptionGuard`] cleans up.
+enum SubscriptionKind {
+    Notification,
+    Sequence,
+}
+
+/// Held by a [`Notifications`]/[`SequenceUpdates`] handle; on drop it removes
+/// the backing manager from the client, stopping its listener task(s). A [`Weak`]
+/// reference means a dropped handle after the client is gone is a no-op.
+pub(crate) struct SubscriptionGuard {
+    inner: Weak<Inner>,
+    id: u64,
+    kind: SubscriptionKind,
+}
+
+impl Drop for SubscriptionGuard {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        match self.kind {
+            SubscriptionKind::Notification => {
+                inner.notification_managers.remove(&self.id);
+            }
+            SubscriptionKind::Sequence => {
+                inner.sequence_managers.remove(&self.id);
+            }
+        }
+    }
 }
 
 /// The Oxia client.
@@ -55,6 +88,14 @@ pub(crate) struct Inner {
 /// Dropping the last clone tears down all background work abruptly; call
 /// [`close`](OxiaClient::close) for a graceful shutdown that flushes pending
 /// batches and closes sessions.
+///
+/// # Cancellation
+///
+/// Dropping an operation's future stops *waiting* but does not recall the
+/// operation: once submitted to a batch it may still execute on the server.
+/// Use conditional operations (e.g.
+/// [`expected_version_id`](crate::PutBuilder::expected_version_id)) when you
+/// need certainty about what was applied.
 #[derive(Clone)]
 pub struct OxiaClient {
     inner: Arc<Inner>,
@@ -76,6 +117,24 @@ impl OxiaClient {
     }
 
     /// Connects to the given service address (`host:port`) with default options.
+    ///
+    /// Use [`OxiaClient::builder`] to customize the namespace, timeouts, or
+    /// batching before connecting.
+    ///
+    /// # Errors
+    ///
+    /// Fails fast — within the request timeout — when the cluster is
+    /// unreachable ([`OxiaError::Disconnected`] / [`OxiaError::Timeout`]), or
+    /// with [`OxiaError::Grpc`] when the namespace does not exist
+    /// (`NotFound`) or the credentials are rejected (`Unauthenticated`).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), oxia::OxiaError> {
+    /// let client = oxia::OxiaClient::connect("localhost:6648").await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn connect(service_address: impl Into<String>) -> Result<OxiaClient, OxiaError> {
         OxiaClientBuilder::new()
             .service_address(service_address)
@@ -94,12 +153,16 @@ impl OxiaClient {
             })
             .await?,
         );
-        let write_stream_manager = Arc::new(WriteStreamManager::new(
-            options.namespace.clone(),
-            shard_manager.clone(),
-            provider_manager.clone(),
-            options.request_timeout,
-        ));
+        let batcher_deps = Arc::new(BatcherDeps {
+            namespace: options.namespace.clone(),
+            shard_manager: shard_manager.clone(),
+            provider_manager: provider_manager.clone(),
+            max_batch_size: options.batch_max_size as usize,
+            max_requests_per_batch: options.max_requests_per_batch as usize,
+            max_write_batches_in_flight: options.max_write_batches_in_flight as usize,
+            max_read_batches_in_flight: options.max_read_batches_in_flight as usize,
+            request_timeout: options.request_timeout,
+        });
         let session_manager = Arc::new(SessionManager::new(
             options.identity.clone(),
             options.session_timeout,
@@ -114,9 +177,10 @@ impl OxiaClient {
                 provider_manager,
                 shard_manager,
                 session_manager,
-                write_stream_manager,
-                notification_tasks: Mutex::new(Vec::new()),
-                sequence_tasks: Mutex::new(Vec::new()),
+                batcher_deps,
+                notification_managers: DashMap::new(),
+                sequence_managers: DashMap::new(),
+                next_subscription_id: AtomicU64::new(0),
                 write_batchers: DashMap::new(),
                 read_batchers: DashMap::new(),
                 closed: AtomicBool::new(false),
@@ -124,12 +188,49 @@ impl OxiaClient {
         })
     }
 
-    /// Stores `value` under `key`.
+    /// Stores `value` under `key`, creating or overwriting the record.
     ///
     /// Returns a [`PutBuilder`]; chain options
     /// ([`ephemeral`](PutBuilder::ephemeral),
-    /// [`expected_version_id`](PutBuilder::expected_version_id), …) and
-    /// `.await` it.
+    /// [`expected_version_id`](PutBuilder::expected_version_id),
+    /// [`partition_key`](PutBuilder::partition_key),
+    /// [`sequence_key_deltas`](PutBuilder::sequence_key_deltas),
+    /// [`secondary_index`](PutBuilder::secondary_index), …) and `.await` it.
+    /// The value is `Bytes`-backed and is not copied on its way to the wire.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns:
+    /// - [`OxiaError::InvalidArgument`] when
+    ///   [`sequence_key_deltas`](PutBuilder::sequence_key_deltas) is used
+    ///   without a partition key, with a zero delta, or together with an
+    ///   expected version;
+    /// - [`OxiaError::UnexpectedVersionId`] when a
+    ///   [`expected_version_id`](PutBuilder::expected_version_id) /
+    ///   [`expected_record_not_exists`](PutBuilder::expected_record_not_exists)
+    ///   condition does not hold;
+    /// - [`OxiaError::SessionExpired`] when an
+    ///   [`ephemeral`](PutBuilder::ephemeral) put races a session expiry
+    ///   (retrying creates a fresh session);
+    /// - [`OxiaError::RequestTooLarge`] when key + value exceed the maximum
+    ///   batch size ([`batch_max_size`](crate::OxiaClientBuilder::batch_max_size));
+    /// - [`OxiaError::Timeout`] when the request timeout elapses;
+    /// - [`OxiaError::Closed`] after [`close`](OxiaClient::close);
+    /// - transient routing/transport errors
+    ///   ([`OxiaError::is_retryable`](crate::OxiaError::is_retryable)).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// let res = client.put("config/mode", "primary").await?;
+    /// // Compare-and-swap on the returned version id:
+    /// client
+    ///     .put("config/mode", "standby")
+    ///     .expected_version_id(res.version.version_id)
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
     pub fn put(&self, key: impl Into<String>, value: impl Into<Bytes>) -> PutBuilder {
         PutBuilder::new(self.clone(), key.into(), value.into())
     }
@@ -138,18 +239,93 @@ impl OxiaClient {
     ///
     /// Returns a [`GetBuilder`]; chain options
     /// ([`comparison`](GetBuilder::comparison),
-    /// [`use_index`](GetBuilder::use_index), …) and `.await` it.
+    /// [`partition_key`](GetBuilder::partition_key),
+    /// [`include_value`](GetBuilder::include_value),
+    /// [`use_index`](GetBuilder::use_index), …) and `.await` it. With a
+    /// non-[`Equal`](crate::ComparisonType::Equal) comparison the returned
+    /// record's key is the *found* key, which may differ from the requested
+    /// one. Records written with a partition key must be read with the same
+    /// partition key.
+    ///
+    /// An exact-match get is routed to the single shard that owns the key (or
+    /// the partition key, when given); an inequality comparison or a
+    /// secondary-index lookup instead fans out across all shards.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns:
+    /// - [`OxiaError::KeyNotFound`] when no record matches;
+    /// - [`OxiaError::Timeout`] when the request timeout elapses;
+    /// - [`OxiaError::Closed`] after [`close`](OxiaClient::close);
+    /// - transient routing/transport errors
+    ///   ([`OxiaError::is_retryable`](crate::OxiaError::is_retryable)).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// use oxia::ComparisonType;
+    ///
+    /// let exact = client.get("config/mode").await?;
+    /// let floor = client
+    ///     .get("config/zz")
+    ///     .comparison(ComparisonType::Floor)
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
     pub fn get(&self, key: impl Into<String>) -> GetBuilder {
         GetBuilder::new(self.clone(), key.into())
     }
 
     /// Deletes the record associated with `key`.
+    ///
+    /// Returns a [`DeleteBuilder`]; optionally chain
+    /// [`expected_version_id`](DeleteBuilder::expected_version_id) for a
+    /// conditional delete or
+    /// [`partition_key`](DeleteBuilder::partition_key) for records written
+    /// with one, and `.await` it.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns:
+    /// - [`OxiaError::KeyNotFound`] when the record does not exist;
+    /// - [`OxiaError::UnexpectedVersionId`] when an
+    ///   [`expected_version_id`](DeleteBuilder::expected_version_id)
+    ///   condition does not hold;
+    /// - [`OxiaError::Timeout`] / [`OxiaError::Closed`] / transient errors as
+    ///   for the other operations.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// client.delete("config/mode").await?;
+    /// # Ok(()) }
+    /// ```
     pub fn delete(&self, key: impl Into<String>) -> DeleteBuilder {
         DeleteBuilder::new(self.clone(), key.into())
     }
 
     /// Deletes every record with `min_key_inclusive <= key < max_key_exclusive`
     /// (in Oxia's slash-aware key order).
+    ///
+    /// Without a [`partition_key`](DeleteRangeBuilder::partition_key) the
+    /// deletion is applied on every shard; it is not atomic across shards.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns [`OxiaError::Timeout`],
+    /// [`OxiaError::Closed`], or transient routing/transport errors. Deleting
+    /// an empty range is not an error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// // Everything under the "config/" prefix:
+    /// client.delete_range("config/", "config/~").await?;
+    /// # Ok(()) }
+    /// ```
     pub fn delete_range(
         &self,
         min_key_inclusive: impl Into<String>,
@@ -165,8 +341,26 @@ impl OxiaClient {
     /// Lists the keys with `min_key_inclusive <= key < max_key_exclusive`
     /// (in Oxia's slash-aware key order).
     ///
-    /// `.await` the builder for all keys at once, or call
-    /// [`stream()`](ListBuilder::stream) for an incremental, ordered stream.
+    /// `.await` the builder for all keys at once (bounded by the request
+    /// timeout), or call [`stream()`](ListBuilder::stream) for an
+    /// incremental [`ListStream`](crate::ListStream) with no overall
+    /// deadline. Both deliver keys in the server's global key order, merged
+    /// across shards.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns [`OxiaError::Timeout`] when collecting
+    /// all keys exceeds the request timeout, [`OxiaError::Closed`] after
+    /// [`close`](OxiaClient::close), or transient routing/transport errors.
+    /// An empty range yields an empty `Vec`, not an error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// let keys = client.list("config/", "config/~").await?;
+    /// # Ok(()) }
+    /// ```
     pub fn list(
         &self,
         min_key_inclusive: impl Into<String>,
@@ -182,9 +376,32 @@ impl OxiaClient {
     /// Reads every record with `min_key_inclusive <= key < max_key_exclusive`
     /// (in Oxia's slash-aware key order).
     ///
-    /// `.await` the builder for all records at once, or call
-    /// [`stream()`](RangeScanBuilder::stream) for an incremental, ordered
-    /// stream with bounded memory use.
+    /// `.await` the builder for all records at once (bounded by the request
+    /// timeout), or call [`stream()`](RangeScanBuilder::stream) for an
+    /// incremental [`RangeScanStream`](crate::RangeScanStream) that holds at
+    /// most one buffered record per shard — prefer it for large ranges. Both
+    /// deliver records in the server's global key order, merged across
+    /// shards.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns [`OxiaError::Timeout`] when collecting
+    /// all records exceeds the request timeout, [`OxiaError::Closed`] after
+    /// [`close`](OxiaClient::close), or transient routing/transport errors.
+    /// An empty range yields an empty `Vec`, not an error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// use futures::TryStreamExt;
+    ///
+    /// let mut scan = client.range_scan("logs/", "logs/~").stream().await?;
+    /// while let Some(record) = scan.try_next().await? {
+    ///     println!("{} => {:?}", record.key, record.value);
+    /// }
+    /// # Ok(()) }
+    /// ```
     pub fn range_scan(
         &self,
         min_key_inclusive: impl Into<String>,
@@ -199,13 +416,67 @@ impl OxiaClient {
 
     /// Subscribes to all changes applied to the database, streamed as
     /// [`Notification`](crate::Notification)s.
+    ///
+    /// Awaiting the builder yields a [`Notifications`](crate::Notifications)
+    /// handle. Per-shard subscriptions are established in the background and
+    /// re-established automatically after connection loss, resuming from the
+    /// last delivered offset so no notification in between is lost. Events
+    /// from the same shard arrive in order; interleaving across shards is
+    /// unspecified. Changes made before the subscription is fully established
+    /// may not be delivered.
+    ///
+    /// Dropping the handle ends the subscription. When the channel buffer
+    /// ([`buffer_size`](NotificationsBuilder::buffer_size)) is full, delivery
+    /// applies backpressure to the per-shard listeners.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns [`OxiaError::Closed`] after
+    /// [`close`](OxiaClient::close).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// let mut notifications = client.notifications().await?;
+    /// while let Some(event) = notifications.recv().await {
+    ///     println!("{event}");
+    /// }
+    /// # Ok(()) }
+    /// ```
     pub fn notifications(&self) -> NotificationsBuilder {
         NotificationsBuilder::new(self.clone())
     }
 
     /// Subscribes to updates of the sequence rooted at `key`, delivering the
     /// highest assigned sequence key as it advances. `partition_key` must be
-    /// the partition key the sequential records are written with.
+    /// the partition key the sequential records are written with
+    /// (see [`PutBuilder::sequence_key_deltas`]).
+    ///
+    /// Awaiting the builder yields a
+    /// [`SequenceUpdates`](crate::SequenceUpdates) handle. Consecutive
+    /// advances may be coalesced: each delivery carries the *highest*
+    /// sequence key at that moment. The subscription reconnects automatically
+    /// after connection loss; dropping the handle ends it.
+    ///
+    /// # Errors
+    ///
+    /// Awaiting the builder returns [`OxiaError::Closed`] after
+    /// [`close`](OxiaClient::close).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: &oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// let mut updates = client.sequence_updates("seq/events", "pk-0").await?;
+    /// client
+    ///     .put("seq/events", "data")
+    ///     .partition_key("pk-0")
+    ///     .sequence_key_deltas([1])
+    ///     .await?;
+    /// let highest = updates.recv().await;
+    /// # Ok(()) }
+    /// ```
     pub fn sequence_updates(
         &self,
         key: impl Into<String>,
@@ -215,11 +486,28 @@ impl OxiaClient {
     }
 
     /// Closes the client gracefully: pending batches are flushed, subscriptions
-    /// stop, sessions are closed server-side (removing this client's ephemeral
-    /// records), and connections are released.
+    /// stop, sessions are closed server-side (immediately removing this
+    /// client's ephemeral records), and connections are released.
     ///
     /// Idempotent: subsequent calls (from any clone) return `Ok(())`.
     /// Operations submitted after `close` fail with [`OxiaError::Closed`].
+    /// Merely dropping every clone instead tears the client down abruptly:
+    /// queued operations are not flushed and ephemeral records linger until
+    /// their session times out.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error encountered while shutting down (shutdown
+    /// still proceeds through every component). Only the first call can
+    /// return an error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: oxia::OxiaClient) -> Result<(), oxia::OxiaError> {
+    /// client.close().await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn close(&self) -> Result<(), OxiaError> {
         if self.inner.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
@@ -227,25 +515,40 @@ impl OxiaClient {
         let mut first_err: Option<OxiaError> = None;
 
         // Flush and stop the batchers (writes first, so queued mutations land).
-        for batchers in [&self.inner.write_batchers, &self.inner.read_batchers] {
-            let shards: Vec<i64> = batchers.iter().map(|entry| *entry.key()).collect();
-            for shard in shards {
-                if let Some((_, batcher)) = batchers.remove(&shard) {
-                    track(&mut first_err, batcher.close().await, "batcher");
-                }
+        let write_shards: Vec<i64> = self.inner.write_batchers.iter().map(|e| *e.key()).collect();
+        for shard in write_shards {
+            if let Some((_, batcher)) = self.inner.write_batchers.remove(&shard) {
+                track(&mut first_err, batcher.close().await, "write batcher");
             }
         }
-        for manager in self.inner.notification_tasks.lock().await.drain(..) {
-            track(&mut first_err, manager.shutdown().await, "notifications");
+        let read_shards: Vec<i64> = self.inner.read_batchers.iter().map(|e| *e.key()).collect();
+        for shard in read_shards {
+            if let Some((_, batcher)) = self.inner.read_batchers.remove(&shard) {
+                track(&mut first_err, batcher.close().await, "read batcher");
+            }
         }
-        for manager in self.inner.sequence_tasks.lock().await.drain(..) {
-            track(&mut first_err, manager.shutdown().await, "sequence updates");
+        let notification_ids: Vec<u64> = self
+            .inner
+            .notification_managers
+            .iter()
+            .map(|e| *e.key())
+            .collect();
+        for id in notification_ids {
+            if let Some((_, manager)) = self.inner.notification_managers.remove(&id) {
+                track(&mut first_err, manager.shutdown().await, "notifications");
+            }
         }
-        track(
-            &mut first_err,
-            self.inner.write_stream_manager.close().await,
-            "write streams",
-        );
+        let sequence_ids: Vec<u64> = self
+            .inner
+            .sequence_managers
+            .iter()
+            .map(|e| *e.key())
+            .collect();
+        for id in sequence_ids {
+            if let Some((_, manager)) = self.inner.sequence_managers.remove(&id) {
+                track(&mut first_err, manager.shutdown().await, "sequence updates");
+            }
+        }
         track(
             &mut first_err,
             self.inner.session_manager.close().await,
@@ -294,41 +597,91 @@ impl OxiaClient {
         self.inner.session_manager.get_session_id(shard).await
     }
 
-    /// Returns (creating on first use) the batcher of the given kind for a shard.
-    pub(crate) fn batcher(&self, kind: Batcher, shard_id: i64) -> Arc<BatchManager> {
-        let map = match kind {
-            Batcher::Read => &self.inner.read_batchers,
-            Batcher::Write => &self.inner.write_batchers,
-        };
-        map.entry(shard_id)
+    /// Runs `attempt` against the shard that owns `routing_key`, re-resolving
+    /// the shard and retrying (backoff, bounded by the request timeout) while
+    /// routing is unavailable — `NoShardForKey` (assignments not loaded yet) or
+    /// `ShardMoved` (the shard just split or merged). This is how an operation
+    /// re-routes to the new shard after a split/merge.
+    pub(crate) async fn with_shard_retry<T, F, Fut>(
+        &self,
+        routing_key: &str,
+        attempt: F,
+    ) -> Result<T, OxiaError>
+    where
+        F: Fn(i64) -> Fut,
+        Fut: std::future::Future<Output = Result<T, OxiaError>>,
+    {
+        retry_until(
+            self.request_timeout(),
+            |err| matches!(err, OxiaError::ShardMoved | OxiaError::NoShardForKey { .. }),
+            || async {
+                let shard = self.shard_for(routing_key)?;
+                attempt(shard).await
+            },
+        )
+        .await
+    }
+
+    /// Retries `op` while it fails with `ShardMoved` — for whole-operation
+    /// re-routing (broadcasts) where a single failing shard means the shard set
+    /// changed and the operation must be re-issued against the new set.
+    pub(crate) async fn with_reroute_retry<T, F, Fut>(&self, op: F) -> Result<T, OxiaError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, OxiaError>>,
+    {
+        retry_until(
+            self.request_timeout(),
+            |err| matches!(err, OxiaError::ShardMoved),
+            op,
+        )
+        .await
+    }
+
+    /// Returns (creating on first use) the write batcher for a shard.
+    fn write_batcher(&self, shard_id: i64) -> Arc<WriteBatcher> {
+        self.inner
+            .write_batchers
+            .entry(shard_id)
             .or_insert_with(|| {
-                Arc::new(BatchManager::new(
-                    kind.clone(),
-                    BatcherContext {
-                        shard_id,
-                        shard_manager: self.inner.shard_manager.clone(),
-                        provider_manager: self.inner.provider_manager.clone(),
-                        write_stream_manager: self.inner.write_stream_manager.clone(),
-                        batch_linger: self.inner.options.batch_linger,
-                        max_requests_per_batch: self.inner.options.max_requests_per_batch,
-                        request_timeout: self.inner.options.request_timeout,
-                    },
-                ))
+                Arc::new(WriteBatcher::new(shard_id, self.inner.batcher_deps.clone()))
             })
             .clone()
     }
 
-    /// Submits an operation to a shard's batcher and awaits its response,
-    /// bounded by the request timeout.
-    pub(crate) async fn submit<Req, Resp>(
+    /// Returns (creating on first use) the read batcher for a shard.
+    fn read_batcher(&self, shard_id: i64) -> Arc<ReadBatcher> {
+        self.inner
+            .read_batchers
+            .entry(shard_id)
+            .or_insert_with(|| {
+                Arc::new(ReadBatcher::new(shard_id, self.inner.batcher_deps.clone()))
+            })
+            .clone()
+    }
+
+    /// Submits a write to a shard's batcher and awaits its response, bounded
+    /// by the request timeout.
+    pub(crate) async fn submit_write<Req, Resp>(
         &self,
-        kind: Batcher,
         shard_id: i64,
         request: Req,
-        wrap: fn(Pending<Req, Resp>) -> Operation,
+        wrap: fn(Pending<Req, Resp>) -> WriteOp,
     ) -> Result<Resp, OxiaError> {
+        let (op, rx) = pending_write(request, wrap);
+        self.write_batcher(shard_id).add(op);
+        self.await_response(rx).await
+    }
+
+    /// Submits a get to a shard's batcher and awaits its response, bounded by
+    /// the request timeout.
+    pub(crate) async fn submit_get(
+        &self,
+        shard_id: i64,
+        request: proto::GetRequest,
+    ) -> Result<proto::GetResponse, OxiaError> {
         let (pending, rx) = Pending::new(request);
-        self.batcher(kind, shard_id).add(wrap(pending))?;
+        self.read_batcher(shard_id).add(pending);
         self.await_response(rx).await
     }
 
@@ -352,52 +705,59 @@ impl OxiaClient {
     }
 
     /// Runs a get against every shard and reduces the per-shard winners
-    /// according to the comparison type (used when no partition key pins the
-    /// query to one shard).
+    /// according to the comparison type. Used only when the query is not pinned
+    /// to a single shard — i.e. an inequality comparison or a secondary-index
+    /// lookup with no partition key; an exact-match primary-key get is routed
+    /// directly to its owning shard instead.
     pub(crate) async fn broadcast_get(
         &self,
         request: proto::GetRequest,
         comparison: ComparisonType,
     ) -> Result<GetResult, OxiaError> {
-        let mut join_set = JoinSet::new();
-        for shard in self.inner.shard_manager.get_shard_ids() {
-            let client = self.clone();
+        // Re-issue against the current shard set if a shard splits mid-flight.
+        self.with_reroute_retry(|| {
             let request = request.clone();
-            join_set.spawn(async move {
-                let requested_key = request.key.clone();
-                let response = client
-                    .submit(Batcher::Read, shard, request, Operation::Get)
-                    .await?;
-                check_status(response.status)?;
-                GetResult::from_proto(response, Some(requested_key))
-            });
-        }
-        let mut best: Option<GetResult> = None;
-        let mut join_error: Option<OxiaError> = None;
-        while let Some(joined) = join_set.join_next().await {
-            let result = match joined {
-                Ok(result) => result,
-                Err(err) => {
-                    join_error = Some(OxiaError::Disconnected(err.to_string()));
-                    continue;
+            async move {
+                let mut join_set = JoinSet::new();
+                for shard in self.inner.shard_manager.get_shard_ids() {
+                    let client = self.clone();
+                    let request = request.clone();
+                    join_set.spawn(async move {
+                        let requested_key = request.key.clone();
+                        let response = client.submit_get(shard, request).await?;
+                        check_status(response.status)?;
+                        GetResult::from_proto(response, Some(requested_key))
+                    });
                 }
-            };
-            match result {
-                Ok(candidate) => {
-                    best = Some(match best.take() {
-                        None => candidate,
-                        Some(current) => pick_get_winner(current, candidate, comparison),
-                    })
+                let mut best: Option<GetResult> = None;
+                let mut join_error: Option<OxiaError> = None;
+                while let Some(joined) = join_set.join_next().await {
+                    let result = match joined {
+                        Ok(result) => result,
+                        Err(err) => {
+                            join_error = Some(OxiaError::Disconnected(err.to_string()));
+                            continue;
+                        }
+                    };
+                    match result {
+                        Ok(candidate) => {
+                            best = Some(match best.take() {
+                                None => candidate,
+                                Some(current) => pick_get_winner(current, candidate, comparison),
+                            })
+                        }
+                        // Not every shard has a matching record.
+                        Err(OxiaError::KeyNotFound) => {}
+                        Err(err) => return Err(err),
+                    }
                 }
-                // Not every shard has a matching record.
-                Err(OxiaError::KeyNotFound) => {}
-                Err(err) => return Err(err),
+                if let Some(err) = join_error {
+                    return Err(err);
+                }
+                best.ok_or(OxiaError::KeyNotFound)
             }
-        }
-        if let Some(err) = join_error {
-            return Err(err);
-        }
-        best.ok_or(OxiaError::KeyNotFound)
+        })
+        .await
     }
 
     /// Resolves the target shards for a list/scan: either the single shard
@@ -417,18 +777,29 @@ impl OxiaClient {
         self.ensure_open()?;
         let opens = self.target_shards(partition_key)?.into_iter().map(|shard| {
             let client = self.clone();
-            let mut request = request.clone();
+            let request = request.clone();
             async move {
-                request.shard = Some(shard);
-                let mut provider = client.leader_provider(shard).await?;
-                let streaming = provider.list(request).await?.into_inner();
+                let (first, streaming) = client
+                    .open_streaming_with_retry(shard, move |mut provider| {
+                        let mut request = request.clone();
+                        request.shard = Some(shard);
+                        async move { provider.list(request).await }
+                    })
+                    .await?;
+                let head = first
+                    .map(|response: proto::ListResponse| {
+                        response.keys.into_iter().map(Ok).collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 let stream: ShardStream<String> = Box::pin(
-                    streaming
-                        .map(|chunk| match chunk {
-                            Ok(response) => response.keys.into_iter().map(Ok).collect(),
-                            Err(status) => vec![Err(OxiaError::from(status))],
-                        })
-                        .flat_map(futures::stream::iter),
+                    futures::stream::iter(head).chain(
+                        streaming
+                            .map(|chunk| match chunk {
+                                Ok(response) => response.keys.into_iter().map(Ok).collect(),
+                                Err(status) => vec![Err(OxiaError::from(status))],
+                            })
+                            .flat_map(futures::stream::iter),
+                    ),
                 );
                 Ok::<_, OxiaError>(stream)
             }
@@ -444,22 +815,32 @@ impl OxiaClient {
         self.ensure_open()?;
         let opens = self.target_shards(partition_key)?.into_iter().map(|shard| {
             let client = self.clone();
-            let mut request = request.clone();
+            let request = request.clone();
             async move {
-                request.shard = Some(shard);
-                let mut provider = client.leader_provider(shard).await?;
-                let streaming = provider.range_scan(request).await?.into_inner();
+                let (first, streaming) = client
+                    .open_streaming_with_retry(shard, move |mut provider| {
+                        let mut request = request.clone();
+                        request.shard = Some(shard);
+                        async move { provider.range_scan(request).await }
+                    })
+                    .await?;
+                let to_items = |response: proto::RangeScanResponse| {
+                    response
+                        .records
+                        .into_iter()
+                        .map(|record| GetResult::from_proto(record, None))
+                        .collect::<Vec<_>>()
+                };
+                let head = first.map(to_items).unwrap_or_default();
                 let stream: ShardStream<GetResult> = Box::pin(
-                    streaming
-                        .map(|chunk| match chunk {
-                            Ok(response) => response
-                                .records
-                                .into_iter()
-                                .map(|record| GetResult::from_proto(record, None))
-                                .collect(),
-                            Err(status) => vec![Err(OxiaError::from(status))],
-                        })
-                        .flat_map(futures::stream::iter),
+                    futures::stream::iter(head).chain(
+                        streaming
+                            .map(move |chunk| match chunk {
+                                Ok(response) => to_items(response),
+                                Err(status) => vec![Err(OxiaError::from(status))],
+                            })
+                            .flat_map(futures::stream::iter),
+                    ),
                 );
                 Ok::<_, OxiaError>(stream)
             }
@@ -467,20 +848,67 @@ impl OxiaClient {
         Ok(RangeScanStream::new(merged(try_join_all(opens).await?)))
     }
 
-    async fn leader_provider(
+    /// Opens a per-shard server stream, retrying — with backoff and leader
+    /// hints, bounded by the request timeout — until the first response (or a
+    /// clean end of stream) has been received. Past that point the caller
+    /// consumes the stream without retries, so results are never duplicated
+    /// (the reference client's "verified" pattern).
+    async fn open_streaming_with_retry<Resp, Fut>(
         &self,
         shard: i64,
-    ) -> Result<proto::oxia_client_client::OxiaClientClient<tonic::transport::Channel>, OxiaError>
+        call: impl Fn(proto::oxia_client_client::OxiaClientClient<tonic::transport::Channel>) -> Fut,
+    ) -> Result<(Option<Resp>, tonic::Streaming<Resp>), OxiaError>
+    where
+        Fut: Future<Output = Result<tonic::Response<tonic::Streaming<Resp>>, tonic::Status>>,
     {
-        let leader = self
-            .inner
-            .shard_manager
-            .get_leader(shard)
-            .ok_or(OxiaError::LeaderNotFound { shard })?;
-        self.inner
-            .provider_manager
-            .get_provider(leader.service_address)
-            .await
+        let deadline = tokio::time::Instant::now() + self.request_timeout();
+        let mut hint: Option<LeaderHint> = None;
+        let mut attempt: u32 = 0;
+        loop {
+            let outcome: Result<_, DecodedStatus> = async {
+                let target = match hint.as_ref().and_then(|h| h.address_for(shard)) {
+                    Some(address) => crate::address::ensure_protocol(address.to_string()),
+                    None => {
+                        self.inner
+                            .shard_manager
+                            .get_leader(shard)
+                            .ok_or_else(|| {
+                                DecodedStatus::from(OxiaError::LeaderNotFound { shard })
+                            })?
+                            .service_address
+                    }
+                };
+                let provider = self
+                    .inner
+                    .provider_manager
+                    .get_provider(target)
+                    .await
+                    .map_err(DecodedStatus::from)?;
+                let mut streaming = call(provider).await.map_err(decode_status)?.into_inner();
+                match streaming.next().await {
+                    Some(Ok(first)) => Ok((Some(first), streaming)),
+                    None => Ok((None, streaming)),
+                    Some(Err(status)) => Err(decode_status(status)),
+                }
+            }
+            .await;
+            match outcome {
+                Ok(opened) => return Ok(opened),
+                Err(decoded) => {
+                    if decoded.leader_hint.is_some() {
+                        hint = decoded.leader_hint;
+                    }
+                    let delay = retry_delay(attempt);
+                    attempt += 1;
+                    if !decoded.error.is_retryable()
+                        || tokio::time::Instant::now() + delay >= deadline
+                    {
+                        return Err(decoded.error);
+                    }
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
     }
 
     pub(crate) async fn open_notifications(
@@ -488,14 +916,36 @@ impl OxiaClient {
         buffer_size: usize,
     ) -> Result<Notifications, OxiaError> {
         self.ensure_open()?;
+        let shards = self.inner.shard_manager.get_shard_ids();
+        let shard_count = shards.len();
         let (tx, rx) = mpsc::channel(buffer_size);
+        let (init_tx, mut init_rx) = mpsc::channel(shard_count.max(1));
         let manager = NotificationManager::new(
+            shards,
             self.inner.shard_manager.clone(),
             self.inner.provider_manager.clone(),
             tx,
+            init_tx,
         );
-        self.inner.notification_tasks.lock().await.push(manager);
-        Ok(Notifications::new(rx))
+        // Make the subscription live before returning, so no change in the
+        // window between here and the first stream is missed. Returning early
+        // (on error/timeout) drops `manager`, cancelling every listener.
+        let deadline = tokio::time::Instant::now() + self.request_timeout();
+        let mut ready = 0;
+        while ready < shard_count {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, init_rx.recv()).await {
+                Ok(Some(Ok(()))) => ready += 1,
+                Ok(Some(Err(err))) => return Err(err),
+                Ok(None) => break,
+                Err(_) => return Err(OxiaError::Timeout),
+            }
+        }
+        let id = self.register_notification_manager(manager);
+        Ok(Notifications::new(
+            rx,
+            self.subscription_guard(id, SubscriptionKind::Notification),
+        ))
     }
 
     pub(crate) async fn open_sequence_updates(
@@ -513,30 +963,65 @@ impl OxiaClient {
             self.inner.provider_manager.clone(),
             tx,
         );
-        self.inner.sequence_tasks.lock().await.push(manager);
-        Ok(SequenceUpdates::new(rx))
+        let id = self
+            .inner
+            .next_subscription_id
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner.sequence_managers.insert(id, manager);
+        Ok(SequenceUpdates::new(
+            rx,
+            self.subscription_guard(id, SubscriptionKind::Sequence),
+        ))
     }
 
-    /// Broadcasts a delete-range to every shard.
+    /// Registers a live notification manager so [`close`](Self::close) can shut
+    /// it down, returning the id used to remove it when its handle is dropped.
+    fn register_notification_manager(&self, manager: NotificationManager) -> u64 {
+        let id = self
+            .inner
+            .next_subscription_id
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner.notification_managers.insert(id, manager);
+        id
+    }
+
+    /// Builds the guard a subscription handle holds; dropping the handle removes
+    /// (and thereby stops) the registered manager.
+    fn subscription_guard(&self, id: u64, kind: SubscriptionKind) -> SubscriptionGuard {
+        SubscriptionGuard {
+            inner: Arc::downgrade(&self.inner),
+            id,
+            kind,
+        }
+    }
+
+    /// Broadcasts a delete-range to every shard, re-issuing against the current
+    /// shard set if one splits or merges mid-flight (idempotent).
     pub(crate) async fn broadcast_delete_range(
         &self,
         request: proto::DeleteRangeRequest,
     ) -> Result<(), OxiaError> {
-        let mut join_set = JoinSet::new();
-        for shard in self.inner.shard_manager.get_shard_ids() {
-            let client = self.clone();
+        self.with_reroute_retry(|| {
             let request = request.clone();
-            join_set.spawn(async move {
-                let response = client
-                    .submit(Batcher::Write, shard, request, Operation::DeleteRange)
-                    .await?;
-                check_status(response.status)
-            });
-        }
-        while let Some(joined) = join_set.join_next().await {
-            joined.map_err(|err| OxiaError::Disconnected(err.to_string()))??;
-        }
-        Ok(())
+            async move {
+                let mut join_set = JoinSet::new();
+                for shard in self.inner.shard_manager.get_shard_ids() {
+                    let client = self.clone();
+                    let request = request.clone();
+                    join_set.spawn(async move {
+                        let response = client
+                            .submit_write(shard, request, WriteOp::DeleteRange)
+                            .await?;
+                        check_status(response.status)
+                    });
+                }
+                while let Some(joined) = join_set.join_next().await {
+                    joined.map_err(|err| OxiaError::Disconnected(err.to_string()))??;
+                }
+                Ok(())
+            }
+        })
+        .await
     }
 }
 

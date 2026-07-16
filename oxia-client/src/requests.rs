@@ -3,10 +3,9 @@
 //! [`IntoFuture`]), or call an alternate finisher such as
 //! [`ListBuilder::stream`].
 
-use crate::batch_manager::Batcher;
+use crate::batcher::WriteOp;
 use crate::client::{OxiaClient, check_status};
 use crate::errors::OxiaError;
-use crate::operations::Operation;
 use crate::proto;
 use crate::streams::{ListStream, Notifications, RangeScanStream, SequenceUpdates};
 use crate::types::{ComparisonType, GetResult, PutResult, VERSION_ID_NOT_EXISTS};
@@ -69,8 +68,13 @@ impl PutBuilder {
     }
 
     /// Turns the key into a server-generated sequential key: each delta is
-    /// added to the current highest sequence and appended as a suffix.
-    /// Requires [`partition_key`](PutBuilder::partition_key).
+    /// added to the current highest sequence and appended as a zero-padded
+    /// suffix.
+    ///
+    /// Requires [`partition_key`](PutBuilder::partition_key); every delta must
+    /// be greater than zero; and it cannot be combined with
+    /// [`expected_version_id`](PutBuilder::expected_version_id). Awaiting a put
+    /// that violates any of these fails with [`OxiaError::InvalidArgument`].
     pub fn sequence_key_deltas(mut self, deltas: impl IntoIterator<Item = u64>) -> Self {
         self.sequence_key_deltas = deltas.into_iter().collect();
         self
@@ -100,27 +104,75 @@ impl PutBuilder {
     async fn execute(self) -> Result<PutResult, OxiaError> {
         let client = self.client;
         client.ensure_open()?;
-        let routing_key = self.partition_key.as_deref().unwrap_or(&self.key);
-        let shard = client.shard_for(routing_key)?;
-        let session_id = if self.ephemeral {
-            Some(client.session_id_for(shard).await?)
-        } else {
-            None
-        };
-        let request = proto::PutRequest {
-            key: self.key.clone(),
-            value: self.value,
-            expected_version_id: self.expected_version_id,
-            session_id,
-            client_identity: Some(client.identity().to_string()),
-            partition_key: self.partition_key,
-            sequence_key_delta: self.sequence_key_deltas,
-            secondary_indexes: self.secondary_indexes,
-            override_version_id: None,
-            override_modifications_count: None,
-        };
+        // Validate sequence-key puts up front (matching the Java client's
+        // `PutOperation`): sequential keys require a partition key, are
+        // incompatible with an expected version, and every delta must be
+        // positive. Negative deltas are already impossible (`u64`).
+        if !self.sequence_key_deltas.is_empty() {
+            if self.partition_key.is_none() {
+                return Err(OxiaError::InvalidArgument(
+                    "sequence_key_deltas requires a partition_key".to_string(),
+                ));
+            }
+            if self.expected_version_id.is_some() {
+                return Err(OxiaError::InvalidArgument(
+                    "sequence_key_deltas cannot be combined with expected_version_id".to_string(),
+                ));
+            }
+            if self.sequence_key_deltas.contains(&0) {
+                return Err(OxiaError::InvalidArgument(
+                    "every sequence delta must be greater than zero".to_string(),
+                ));
+            }
+        }
+        let routing_key = self
+            .partition_key
+            .as_deref()
+            .unwrap_or(&self.key)
+            .to_string();
+        let PutBuilder {
+            key,
+            value,
+            expected_version_id,
+            partition_key,
+            sequence_key_deltas,
+            secondary_indexes,
+            ephemeral,
+            ..
+        } = self;
+        let identity = client.identity().to_string();
+        // Re-resolve the shard and (for ephemeral puts) its session on each
+        // attempt, so a split/merge re-routes to the new shard.
         let response = client
-            .submit(Batcher::Write, shard, request, Operation::Put)
+            .with_shard_retry(&routing_key, |shard| {
+                let client = client.clone();
+                let key = key.clone();
+                let value = value.clone();
+                let partition_key = partition_key.clone();
+                let sequence_key_deltas = sequence_key_deltas.clone();
+                let secondary_indexes = secondary_indexes.clone();
+                let identity = identity.clone();
+                async move {
+                    let session_id = if ephemeral {
+                        Some(client.session_id_for(shard).await?)
+                    } else {
+                        None
+                    };
+                    let request = proto::PutRequest {
+                        key,
+                        value,
+                        expected_version_id,
+                        session_id,
+                        client_identity: Some(identity),
+                        partition_key,
+                        sequence_key_delta: sequence_key_deltas,
+                        secondary_indexes,
+                        override_version_id: None,
+                        override_modifications_count: None,
+                    };
+                    client.submit_write(shard, request, WriteOp::Put).await
+                }
+            })
             .await?;
         check_status(response.status)?;
         let version = response
@@ -129,7 +181,7 @@ impl PutBuilder {
         Ok(PutResult {
             // The server returns the key only when it generated it
             // (sequential keys).
-            key: response.key.unwrap_or(self.key),
+            key: response.key.unwrap_or(key),
             version: version.into(),
         })
     }
@@ -199,22 +251,30 @@ impl GetBuilder {
     async fn execute(self) -> Result<GetResult, OxiaError> {
         let client = self.client;
         client.ensure_open()?;
+        let single_shard = is_single_shard_get(
+            self.partition_key.is_some(),
+            self.comparison,
+            self.secondary_index_name.is_some(),
+        );
         let request = proto::GetRequest {
             key: self.key.clone(),
             include_value: self.include_value,
             comparison_type: self.comparison.to_proto() as i32,
             secondary_index_name: self.secondary_index_name,
         };
-        match self.partition_key {
-            Some(partition_key) => {
-                let shard = client.shard_for(&partition_key)?;
-                let response = client
-                    .submit(Batcher::Read, shard, request, Operation::Get)
-                    .await?;
-                check_status(response.status)?;
-                GetResult::from_proto(response, Some(self.key))
-            }
-            None => client.broadcast_get(request, self.comparison).await,
+        if single_shard {
+            let route_key = self.partition_key.unwrap_or_else(|| self.key.clone());
+            let response = client
+                .with_shard_retry(&route_key, |shard| {
+                    let client = client.clone();
+                    let request = request.clone();
+                    async move { client.submit_get(shard, request).await }
+                })
+                .await?;
+            check_status(response.status)?;
+            GetResult::from_proto(response, Some(self.key))
+        } else {
+            client.broadcast_get(request, self.comparison).await
         }
     }
 }
@@ -226,6 +286,21 @@ impl IntoFuture for GetBuilder {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.execute())
     }
+}
+
+/// Whether a get is pinned to a single shard (routed by partition key, or by
+/// the primary key for an exact match) rather than broadcast to every shard.
+///
+/// A partition key always pins the query. Without one, only an exact
+/// ([`Equal`](ComparisonType::Equal)) primary-key lookup owns a single shard;
+/// an inequality comparison (its nearest match may sit on any shard) or a
+/// secondary-index lookup (indexed independently on each shard) must fan out.
+fn is_single_shard_get(
+    has_partition_key: bool,
+    comparison: ComparisonType,
+    has_secondary_index: bool,
+) -> bool {
+    has_partition_key || (comparison == ComparisonType::Equal && !has_secondary_index)
 }
 
 /// A pending `delete`, created with [`OxiaClient::delete`]. Chain options and
@@ -267,14 +342,21 @@ impl DeleteBuilder {
     async fn execute(self) -> Result<(), OxiaError> {
         let client = self.client;
         client.ensure_open()?;
-        let routing_key = self.partition_key.as_deref().unwrap_or(&self.key);
-        let shard = client.shard_for(routing_key)?;
+        let routing_key = self
+            .partition_key
+            .as_deref()
+            .unwrap_or(&self.key)
+            .to_string();
         let request = proto::DeleteRequest {
             key: self.key,
             expected_version_id: self.expected_version_id,
         };
         let response = client
-            .submit(Batcher::Write, shard, request, Operation::Delete)
+            .with_shard_retry(&routing_key, |shard| {
+                let client = client.clone();
+                let request = request.clone();
+                async move { client.submit_write(shard, request, WriteOp::Delete).await }
+            })
             .await?;
         check_status(response.status)
     }
@@ -330,9 +412,16 @@ impl DeleteRangeBuilder {
         };
         match self.partition_key {
             Some(partition_key) => {
-                let shard = client.shard_for(&partition_key)?;
                 let response = client
-                    .submit(Batcher::Write, shard, request, Operation::DeleteRange)
+                    .with_shard_retry(&partition_key, |shard| {
+                        let client = client.clone();
+                        let request = request.clone();
+                        async move {
+                            client
+                                .submit_write(shard, request, WriteOp::DeleteRange)
+                                .await
+                        }
+                    })
                     .await?;
                 check_status(response.status)
             }
@@ -599,5 +688,49 @@ impl IntoFuture for SequenceUpdatesBuilder {
                 .open_sequence_updates(self.key, self.partition_key, self.buffer_size)
                 .await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equal_primary_key_get_is_single_shard() {
+        // The common case: exact get by key, no partition key, no index.
+        assert!(is_single_shard_get(false, ComparisonType::Equal, false));
+    }
+
+    #[test]
+    fn a_partition_key_always_pins_the_shard() {
+        for comparison in [
+            ComparisonType::Equal,
+            ComparisonType::Floor,
+            ComparisonType::Ceiling,
+            ComparisonType::Lower,
+            ComparisonType::Higher,
+        ] {
+            assert!(is_single_shard_get(true, comparison, false));
+            // Even a secondary-index lookup is pinned when a partition key routes it.
+            assert!(is_single_shard_get(true, comparison, true));
+        }
+    }
+
+    #[test]
+    fn inequality_gets_without_partition_key_broadcast() {
+        for comparison in [
+            ComparisonType::Floor,
+            ComparisonType::Ceiling,
+            ComparisonType::Lower,
+            ComparisonType::Higher,
+        ] {
+            assert!(!is_single_shard_get(false, comparison, false));
+        }
+    }
+
+    #[test]
+    fn secondary_index_get_without_partition_key_broadcasts() {
+        // Even an exact match must fan out when it targets a secondary index.
+        assert!(!is_single_shard_get(false, ComparisonType::Equal, true));
     }
 }

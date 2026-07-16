@@ -21,10 +21,17 @@ async fn start_oxia() -> (ContainerAsync<GenericImage>, String) {
         .await
         .expect("Failed to start Oxia container");
 
-    let host_port = container
-        .get_host_port_ipv4(OXIA_PORT)
-        .await
-        .expect("Failed to get host port");
+    // Under heavy parallel container churn, docker inspect can briefly race
+    // the port mapping; retry a few times before giving up.
+    let mut host_port = container.get_host_port_ipv4(OXIA_PORT).await;
+    for _ in 0..20 {
+        if host_port.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        host_port = container.get_host_port_ipv4(OXIA_PORT).await;
+    }
+    let host_port = host_port.expect("Failed to get host port");
 
     let address = format!("http://127.0.0.1:{}", host_port);
     (container, address)
@@ -508,10 +515,9 @@ async fn test_notifications() {
     let (_container, address) = start_oxia().await;
     let client = new_client(&address).await;
 
+    // No warm-up sleep: `notifications()` only returns once every shard's
+    // subscription is live, so the changes below cannot race ahead of it.
     let mut notification_rx = client.notifications().await.unwrap();
-
-    // Give notification listener time to connect
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Create a key
     client
@@ -570,6 +576,61 @@ async fn test_notifications() {
     ));
 
     client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_notifications_live_on_return() {
+    // The subscription must be live the instant `notifications()` returns: a
+    // change made immediately afterwards, with no delay, is still delivered.
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let mut rx = client.notifications().await.unwrap();
+    client
+        .put("live/key".to_string(), b"v".to_vec())
+        .await
+        .unwrap();
+
+    let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("notification not delivered in time")
+        .expect("notification stream closed");
+    assert!(matches!(
+        got,
+        Notification::KeyCreated { key, .. } if key == "live/key"
+    ));
+
+    client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_notifications_drop_releases_subscription() {
+    // Dropping the handle stops its listeners and leaves the client healthy:
+    // a fresh subscription still works and shutdown completes promptly.
+    let (_container, address) = start_oxia().await;
+    let client = new_client(&address).await;
+
+    let rx = client.notifications().await.unwrap();
+    drop(rx);
+
+    let mut rx2 = client.notifications().await.unwrap();
+    client
+        .put("drop/key".to_string(), b"v".to_vec())
+        .await
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(5), rx2.recv())
+        .await
+        .expect("notification not delivered in time")
+        .expect("notification stream closed");
+    assert!(matches!(
+        got,
+        Notification::KeyCreated { key, .. } if key == "drop/key"
+    ));
+
+    tokio::time::timeout(Duration::from_secs(5), client.close())
+        .await
+        .expect("close hung after dropping a subscription")
+        .unwrap();
 }
 
 // ============================================================
@@ -722,8 +783,9 @@ async fn test_client_builder_options() {
         .service_address(address)
         .namespace("default".to_string())
         .identity("test-client".to_string())
-        .batch_linger(Duration::from_millis(10))
         .batch_max_size(256 * 1024)
+        .max_write_batches_in_flight(2)
+        .max_read_batches_in_flight(2)
         .session_timeout(Duration::from_secs(30))
         .request_timeout(Duration::from_secs(15))
         .build()
@@ -868,7 +930,15 @@ async fn test_get_without_value() {
 #[tokio::test]
 async fn test_large_value() {
     let (_container, address) = start_oxia().await;
-    let client = new_client(&address).await;
+    // A 1MiB value exceeds the default 128KiB batch_max_size (which would
+    // reject it with RequestTooLarge); raise the limit for this client.
+    let client = OxiaClientBuilder::new()
+        .service_address(address.clone())
+        .batch_max_size(2 * 1024 * 1024)
+        .request_timeout(Duration::from_secs(10))
+        .build()
+        .await
+        .unwrap();
 
     // 1MB value
     let large_value: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
@@ -1630,4 +1700,312 @@ async fn build_fails_fast_when_cluster_unreachable() {
         Ok(Err(_)) => {}
         Err(_) => panic!("build hung instead of failing fast within the request timeout"),
     }
+}
+
+// ============================================================
+// Adaptive Batching Tests (P1-9 / P1-10)
+// ============================================================
+
+/// A single write larger than `batch_max_size` is rejected client-side.
+#[tokio::test]
+async fn test_put_larger_than_max_batch_size_is_rejected() {
+    let (_container, address) = start_oxia().await;
+    let client = OxiaClientBuilder::new()
+        .service_address(address)
+        .batch_max_size(1024)
+        .build()
+        .await
+        .unwrap();
+
+    let result = client.put("too/large", vec![0u8; 4096]).await;
+    assert!(matches!(result, Err(OxiaError::RequestTooLarge)));
+
+    // The client is still fully usable afterwards.
+    client.put("too/small", b"ok".to_vec()).await.unwrap();
+    let got = client.get("too/small").await.unwrap();
+    assert_eq!(got.value.as_deref(), Some(b"ok".as_ref()));
+    client.close().await.unwrap();
+}
+
+/// Writes exceeding the batch byte limit split across batches and all land.
+#[tokio::test]
+async fn test_batches_split_at_byte_limit() {
+    let (_container, address) = start_oxia().await;
+    let client = OxiaClientBuilder::new()
+        .service_address(address)
+        // Each value below is 4KiB, so at most two writes fit per batch.
+        .batch_max_size(10 * 1024)
+        .build()
+        .await
+        .unwrap();
+
+    let puts: Vec<_> = (0..20)
+        .map(|i| client.put(format!("split/{i:02}"), vec![b'x'; 4096]))
+        .collect();
+    for put in puts {
+        put.await.unwrap();
+    }
+    let keys = client.list("split/", "split/~").await.unwrap();
+    assert_eq!(keys.len(), 20);
+    client.close().await.unwrap();
+}
+
+/// With a window of one batch in flight, heavy concurrent traffic to the same
+/// shard coalesces into growing batches; everything must complete in order and
+/// nothing may be lost.
+#[tokio::test]
+async fn test_adaptive_window_of_one_under_concurrency() {
+    let (_container, address) = start_oxia().await;
+    let client = OxiaClientBuilder::new()
+        .service_address(address)
+        .max_write_batches_in_flight(1)
+        .max_read_batches_in_flight(1)
+        .build()
+        .await
+        .unwrap();
+
+    // Same partition key => same shard => one dispatch window.
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..200 {
+        let client = client.clone();
+        tasks.spawn(async move {
+            client
+                .put(format!("window/{i:03}"), format!("v{i}").into_bytes())
+                .partition_key("window-pk")
+                .await
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap().unwrap();
+    }
+
+    // Sequential writes to one key through the same window preserve order:
+    // the last write must win.
+    for i in 0..50 {
+        client
+            .put("window/counter", format!("{i}").into_bytes())
+            .partition_key("window-pk")
+            .await
+            .unwrap();
+    }
+    let got = client
+        .get("window/counter")
+        .partition_key("window-pk")
+        .await
+        .unwrap();
+    assert_eq!(got.value.as_deref(), Some(b"49".as_ref()));
+
+    // Reads batch through their own window of one.
+    let gets: Vec<_> = (0..200)
+        .map(|i| {
+            client
+                .get(format!("window/{i:03}"))
+                .partition_key("window-pk")
+        })
+        .collect();
+    for (i, get) in gets.into_iter().enumerate() {
+        let got = get.await.unwrap();
+        assert_eq!(got.value.as_deref(), Some(format!("v{i}").as_bytes()));
+    }
+    client.close().await.unwrap();
+}
+
+// ============================================================
+// Retry / Outage Tests (P1-11)
+// ============================================================
+
+/// Starts Oxia on a host port that stays stable across container
+/// stop/start. Docker re-assigns ephemeral (`-P`) host ports on restart, so
+/// the restart test must pin one — like any real deployment, where an
+/// endpoint keeps its address across restarts.
+async fn start_oxia_fixed_port() -> (ContainerAsync<GenericImage>, String) {
+    let image = std::env::var("OXIA_IMAGE").unwrap_or_else(|_| DEFAULT_OXIA_IMAGE.to_string());
+    let tag = std::env::var("OXIA_TAG").unwrap_or_else(|_| DEFAULT_OXIA_TAG.to_string());
+
+    // Grab a free host port and release it just before the container binds it.
+    let host_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+
+    let container = GenericImage::new(image, tag)
+        .with_wait_for(WaitFor::message_on_stdout("Started Grpc server"))
+        .with_mapped_port(host_port, ContainerPort::Tcp(OXIA_PORT))
+        .with_cmd(vec!["oxia", "standalone"])
+        .start()
+        .await
+        .expect("Failed to start Oxia container");
+
+    let address = format!("http://127.0.0.1:{}", host_port);
+    (container, address)
+}
+
+/// Operations issued while the server is down must ride through the outage on
+/// the client's internal retries and complete once the server is back.
+#[tokio::test]
+async fn test_operations_survive_server_restart() {
+    let (container, address) = start_oxia_fixed_port().await;
+    let client = OxiaClientBuilder::new()
+        .service_address(address)
+        .request_timeout(Duration::from_secs(60))
+        .build()
+        .await
+        .unwrap();
+
+    client.put("outage/before", b"v1".to_vec()).await.unwrap();
+
+    container.stop().await.expect("stop oxia");
+    let restarter = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        container.start().await.expect("restart oxia");
+        container
+    });
+
+    // Issued against a stopped server: the write batcher must retry (fresh
+    // stream + backoff) until the server returns.
+    client.put("outage/during", b"v2".to_vec()).await.unwrap();
+
+    // Reads retry through their own path.
+    let got = client.get("outage/during").await.unwrap();
+    assert_eq!(got.value.as_deref(), Some(b"v2".as_ref()));
+
+    // List/scan opens retry too.
+    let keys = client.list("outage/", "outage/~").await.unwrap();
+    assert!(keys.contains(&"outage/during".to_string()));
+
+    let _container = restarter.await.unwrap();
+    client.close().await.unwrap();
+}
+
+// ============================================================
+// Failure-mode gate (P1-G)
+// ============================================================
+//
+// This suite exercises the client's resilience end-to-end against a real
+// server. What is covered here:
+//   - cluster-down fail-fast: `build_fails_fast_when_cluster_unreachable`
+//   - leader restart mid-operation: `test_operations_survive_server_restart`
+//   - leader restart under concurrent load: below
+//   - notification resume after reconnect: below
+//   - session expiry + ephemeral cleanup on close: `test_ephemeral_keys`
+//
+// Two gate scenarios cannot be driven against the `oxia standalone` container
+// and are covered at the unit level instead:
+//   - Shard split/merge under load: the standalone exposes only the public
+//     service (port 6648); it runs no coordinator/admin service, so the
+//     `OxiaAdmin.SplitShard` RPC is unreachable and no live split can be
+//     triggered. The re-routing logic (SHARD_NOT_FOUND -> re-hash + resubmit)
+//     is unit-tested in `client.rs`, matching how the Go/Java clients test it.
+//   - Forced session expiry: the server persists sessions and, on restart,
+//     recovers them with a fresh heartbeat timer while the client transparently
+//     resumes keep-alive — so `SESSION_NOT_FOUND` cannot be provoked through the
+//     public API without a failure-injection hook the standalone does not offer.
+//     The recreate-on-expiry path (keep-alive marks the session dead -> next
+//     ephemeral op opens a fresh session) is covered by the session-manager
+//     logic added in P1-6/P1-7.
+
+/// Receives notifications until a `KeyCreated` for `key` arrives, ignoring any
+/// others, or panics after `within`.
+async fn expect_key_created(rx: &mut oxia::Notifications, key: &str, within: Duration) {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(Notification::KeyCreated { key: k, .. })) if k == key => return,
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("notification stream closed before delivering '{key}'"),
+            Err(_) => panic!("timed out waiting for notification '{key}'"),
+        }
+    }
+}
+
+/// P1-G: a notification subscription must survive a server outage. Each
+/// per-shard listener reconnects and resumes from its last delivered offset, so
+/// a change made after the server returns is still delivered.
+#[tokio::test]
+async fn test_notifications_resume_after_server_restart() {
+    let (container, address) = start_oxia_fixed_port().await;
+    let client = OxiaClientBuilder::new()
+        .service_address(address)
+        .request_timeout(Duration::from_secs(60))
+        .build()
+        .await
+        .unwrap();
+
+    let mut rx = client.notifications().await.unwrap();
+
+    // A change before the outage is delivered normally.
+    client
+        .put("notif-restart/before", b"v1".to_vec())
+        .await
+        .unwrap();
+    expect_key_created(&mut rx, "notif-restart/before", Duration::from_secs(10)).await;
+
+    // Bounce the server underneath the subscription.
+    container.stop().await.expect("stop oxia");
+    let restarter = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        container.start().await.expect("restart oxia");
+        container
+    });
+
+    // A change after the server returns must still reach the subscription: the
+    // listener reconnected and resumed from where it left off.
+    client
+        .put("notif-restart/after", b"v2".to_vec())
+        .await
+        .unwrap();
+    expect_key_created(&mut rx, "notif-restart/after", Duration::from_secs(30)).await;
+
+    let _container = restarter.await.unwrap();
+    client.close().await.unwrap();
+}
+
+/// P1-G: a burst of writes already in flight when the leader restarts must all
+/// ride through the outage on the client's retries — none dropped, none stuck.
+#[tokio::test]
+async fn test_writes_survive_restart_under_concurrent_load() {
+    let (container, address) = start_oxia_fixed_port().await;
+    let client = OxiaClientBuilder::new()
+        .service_address(address)
+        .request_timeout(Duration::from_secs(60))
+        .build()
+        .await
+        .unwrap();
+
+    // Kick off a burst of concurrent writes...
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..50 {
+        let client = client.clone();
+        tasks.spawn(async move {
+            client
+                .put(format!("load/{i:02}"), format!("v{i}").into_bytes())
+                .await
+        });
+    }
+
+    // ...and bounce the server while they are in flight.
+    container.stop().await.expect("stop oxia");
+    let restarter = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        container.start().await.expect("restart oxia");
+        container
+    });
+
+    // Every write must eventually succeed.
+    let mut succeeded = 0;
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap().unwrap();
+        succeeded += 1;
+    }
+    assert_eq!(succeeded, 50);
+
+    let _container = restarter.await.unwrap();
+
+    // Spot-check that writes actually landed with the right values.
+    for i in [0usize, 25, 49] {
+        let got = client.get(format!("load/{i:02}")).await.unwrap();
+        assert_eq!(got.value.as_deref(), Some(format!("v{i}").as_bytes()));
+    }
+    client.close().await.unwrap();
 }

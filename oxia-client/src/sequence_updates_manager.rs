@@ -17,6 +17,12 @@ pub struct SequenceUpdatesManager {
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
+impl Drop for SequenceUpdatesManager {
+    fn drop(&mut self) {
+        self.context.cancel();
+    }
+}
+
 impl SequenceUpdatesManager {
     pub fn new(
         key: String,

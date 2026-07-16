@@ -29,6 +29,7 @@ arc-swap = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
+tonic-types = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

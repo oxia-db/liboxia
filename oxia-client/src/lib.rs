@@ -24,8 +24,8 @@
 //! let floor = client.get("config/z").comparison(ComparisonType::Floor).await?;
 //!
 //! // Range operations, as a whole result or as an ordered stream.
-//! let keys = client.list("config/", "config0").await?;
-//! let mut scan = client.range_scan("config/", "config0").stream().await?;
+//! let keys = client.list("config/", "config/~").await?;
+//! let mut scan = client.range_scan("config/", "config/~").stream().await?;
 //! # let _ = (floor, keys, scan);
 //! client.close().await?;
 //! # Ok(())
@@ -52,14 +52,43 @@
 //!
 //! Keys are sorted with Oxia's slash-aware order (`/`-separated path segments),
 //! not plain lexicographic order; range boundaries follow it.
+//!
+//! # Error handling
+//!
+//! Every operation returns [`OxiaError`]. Semantic outcomes callers commonly
+//! match on are dedicated variants ([`OxiaError::KeyNotFound`],
+//! [`OxiaError::UnexpectedVersionId`], …); transient infrastructure failures
+//! answer `true` to [`OxiaError::is_retryable`] and are safe to retry —
+//! idempotent operations unconditionally, non-idempotent ones (puts without a
+//! version condition) with application-level judgment. Each operation on
+//! [`OxiaClient`] documents the errors it can produce.
+//!
+//! The client retries retryable failures internally — re-routing via the
+//! leader hints the server attaches to routing errors, re-hashing operations
+//! onto the new shard when a shard is split or merged, with exponential
+//! backoff, bounded by the request timeout — so the errors you observe are
+//! post-retry. One consequence, shared with the reference clients: a write
+//! whose batch failed *after* reaching the wire may be retried even though the
+//! server already applied it, so unconditional writes have at-least-once
+//! semantics under retries; version-conditioned writes are exactly-once.
+//!
+//! # Cancellation
+//!
+//! Dropping an operation's future stops waiting but does not recall an
+//! operation already submitted to a batch; it may still execute on the
+//! server. The `recv` methods on [`Notifications`] and [`SequenceUpdates`]
+//! are cancel-safe.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![allow(clippy::result_large_err)]
+// A panic on wire data must never take down the caller's process: forbid
+// `.unwrap()` in library code so every fallible result is handled. Unit tests
+// (compiled with `cfg(test)`) are exempt, where unwrapping is the idiom.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
 mod address;
-mod batch;
-mod batch_manager;
+mod batcher;
 mod client;
 mod client_builder;
 mod client_options;
@@ -72,13 +101,11 @@ mod provider_manager;
 mod requests;
 mod retry;
 mod sequence_updates_manager;
+mod server_error;
 mod session_manager;
 mod shard_manager;
-mod status;
 mod streams;
 mod types;
-mod write_stream;
-mod write_stream_manager;
 
 #[allow(
     clippy::derive_partial_eq_without_eq,
