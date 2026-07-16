@@ -19,9 +19,6 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -73,7 +70,11 @@ jobs:
             echo "::notice::oxia-client is not on crates.io yet (HTTP $code); skipping semver check until the first release."
           fi
 
-      - name: Install protobuf compiler
+      # The semver baseline is the last *published* release, which may predate
+      # the protox migration and still build-depend on protoc. Install it only
+      # here so cargo-semver-checks can build that baseline; the current tree
+      # needs no protoc (it compiles the proto with protox).
+      - name: Install protobuf compiler (for the published baseline)
         if: steps.baseline.outputs.exists == 'true'
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 

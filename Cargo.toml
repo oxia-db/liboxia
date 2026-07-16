@@ -20,6 +20,7 @@ bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tonic-build = "0.13.1"
+protox = "0.7"
 oxia-client = { path = "oxia-client" }
 libc = "0.2"
 futures = "0.3"
