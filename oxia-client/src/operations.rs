@@ -30,14 +30,3 @@ pub(crate) type PendingPut = Pending<proto::PutRequest, proto::PutResponse>;
 pub(crate) type PendingDelete = Pending<proto::DeleteRequest, proto::DeleteResponse>;
 pub(crate) type PendingDeleteRange = Pending<proto::DeleteRangeRequest, proto::DeleteRangeResponse>;
 pub(crate) type PendingGet = Pending<proto::GetRequest, proto::GetResponse>;
-
-/// An entry in a batcher's queue.
-pub(crate) enum Operation {
-    Put(PendingPut),
-    Delete(PendingDelete),
-    DeleteRange(PendingDeleteRange),
-    Get(PendingGet),
-    /// Flush whatever the batcher has accumulated and acknowledge; used by
-    /// [`OxiaClient::close`](crate::OxiaClient::close) to drain gracefully.
-    Flush(oneshot::Sender<()>),
-}

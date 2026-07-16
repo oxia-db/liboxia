@@ -1,0 +1,887 @@
+//! Rate-adaptive batching with a bounded per-shard in-flight window.
+//!
+//! This ports the reference Java client's dispatch-window design: at most
+//! `max_*_batches_in_flight` batches may be outstanding per shard. While the
+//! window has capacity, operations are dispatched almost immediately (a batch
+//! forms only from operations arriving in the same scheduler tick), so a fast
+//! server sees small batches and minimal latency. When the window is
+//! exhausted, the open batch keeps accumulating instead of being flushed, so
+//! batch size automatically tracks the server's service rate — a saturated
+//! server receives ever larger batches up to the byte/count limits, and full
+//! batches queue in FIFO order awaiting a free slot.
+//!
+//! There is no batcher task, timer, or linger: batching is driven entirely by
+//! operation arrival and batch completion. The only spawned work is
+//! - a tiny *flusher* future per open batch (one scheduler yield, so
+//!   concurrently-arriving operations coalesce before dispatch),
+//! - for writes, a response *pump* that exists only while batches are in
+//!   flight on the shard's write stream (it parks the response stream and
+//!   exits when the shard goes idle), and
+//! - for reads, one future per in-flight read RPC.
+//!
+//! Writes on a shard must reach the server in submission order: every dispatch
+//! decision *and* the hand-off to the write stream happen under one mutex, so
+//! stream order always equals dispatch order. Reads have no ordering
+//! constraint and run as independent RPCs.
+
+use crate::errors::OxiaError;
+use crate::operations::{Pending, PendingDelete, PendingDeleteRange, PendingGet, PendingPut};
+use crate::proto;
+use crate::provider_manager::ProviderManager;
+use crate::shard_manager::ShardManager;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+use tokio::sync::mpsc::{self, UnboundedReceiver};
+use tokio::sync::{Notify, oneshot};
+use tonic::Streaming;
+use tonic::codegen::tokio_stream::StreamExt;
+use tonic::codegen::tokio_stream::wrappers::UnboundedReceiverStream;
+use tracing::{debug, warn};
+
+const WRITE_STREAM_HEADER_NAMESPACE: &str = "namespace";
+const WRITE_STREAM_HEADER_SHARD_ID: &str = "shard-id";
+
+/// Dependencies and limits shared by every shard batcher of one client.
+pub(crate) struct BatcherDeps {
+    pub(crate) namespace: String,
+    pub(crate) shard_manager: Arc<ShardManager>,
+    pub(crate) provider_manager: Arc<ProviderManager>,
+    pub(crate) max_batch_size: usize,
+    pub(crate) max_requests_per_batch: usize,
+    pub(crate) max_write_batches_in_flight: usize,
+    pub(crate) max_read_batches_in_flight: usize,
+    pub(crate) request_timeout: Duration,
+}
+
+/// A write operation queued for batching.
+pub(crate) enum WriteOp {
+    Put(PendingPut),
+    Delete(PendingDelete),
+    DeleteRange(PendingDeleteRange),
+}
+
+impl WriteOp {
+    /// Cheap size estimate used for batch byte accounting; mirrors the Java
+    /// client (key length + value length — proto framing overhead ignored).
+    fn size(&self) -> usize {
+        match self {
+            WriteOp::Put(p) => p.request.key.len() + p.request.value.len(),
+            WriteOp::Delete(d) => d.request.key.len(),
+            WriteOp::DeleteRange(r) => {
+                r.request.start_inclusive.len() + r.request.end_exclusive.len()
+            }
+        }
+    }
+
+    fn fail(self, err: OxiaError) {
+        match self {
+            WriteOp::Put(p) => {
+                let _ = p.callback.send(Err(err));
+            }
+            WriteOp::Delete(d) => {
+                let _ = d.callback.send(Err(err));
+            }
+            WriteOp::DeleteRange(r) => {
+                let _ = r.callback.send(Err(err));
+            }
+        }
+    }
+}
+
+/// The open/ready bookkeeping every window shares. `open` is `Some` only while
+/// non-empty; `ready` holds sealed batches awaiting a free window slot.
+struct Queues<B> {
+    open: Option<B>,
+    ready: VecDeque<B>,
+    closed: bool,
+    flush_scheduled: bool,
+}
+
+impl<B> Default for Queues<B> {
+    fn default() -> Self {
+        Queues {
+            open: None,
+            ready: VecDeque::new(),
+            closed: false,
+            flush_scheduled: false,
+        }
+    }
+}
+
+impl<B> Queues<B> {
+    /// The next batch to dispatch once a slot frees: sealed batches first (they
+    /// are older), then the open one.
+    fn take_next(&mut self) -> Option<B> {
+        self.ready.pop_front().or_else(|| self.open.take())
+    }
+
+    fn is_drained(&self) -> bool {
+        self.open.is_none() && self.ready.is_empty()
+    }
+}
+
+fn fail_all<Resp>(
+    callbacks: impl IntoIterator<Item = oneshot::Sender<Result<Resp, OxiaError>>>,
+    err: &OxiaError,
+) {
+    for callback in callbacks {
+        let _ = callback.send(Err(err.clone()));
+    }
+}
+
+/// Completes `callbacks` in order from `responses`; leftovers on either side
+/// indicate a server bug and fail with a decode error.
+fn complete_all<Resp>(
+    callbacks: impl IntoIterator<Item = oneshot::Sender<Result<Resp, OxiaError>>>,
+    responses: impl IntoIterator<Item = Resp>,
+    what: &str,
+) {
+    let mut responses = responses.into_iter();
+    for callback in callbacks {
+        match responses.next() {
+            Some(response) => {
+                let _ = callback.send(Ok(response));
+            }
+            None => {
+                let _ = callback.send(Err(OxiaError::Decode(format!(
+                    "missing {what} response from server"
+                ))));
+            }
+        }
+    }
+    if responses.next().is_some() {
+        warn!("server returned more {what} responses than requested");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Write batching
+// ---------------------------------------------------------------------------
+
+/// An accumulating write batch: wire requests plus their callbacks.
+#[derive(Default)]
+struct WriteBody {
+    puts: Vec<PendingPut>,
+    deletes: Vec<PendingDelete>,
+    delete_ranges: Vec<PendingDeleteRange>,
+    count: usize,
+    bytes: usize,
+}
+
+impl WriteBody {
+    fn push(&mut self, op: WriteOp, size: usize) {
+        match op {
+            WriteOp::Put(p) => self.puts.push(p),
+            WriteOp::Delete(d) => self.deletes.push(d),
+            WriteOp::DeleteRange(r) => self.delete_ranges.push(r),
+        }
+        self.count += 1;
+        self.bytes += size;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Splits into the wire request (requests moved, not cloned) and the
+    /// callback set kept for completion.
+    fn into_request(self, shard: i64) -> (proto::WriteRequest, WriteCallbacks) {
+        let (put_reqs, put_cbs): (Vec<_>, Vec<_>) = self
+            .puts
+            .into_iter()
+            .map(|p| (p.request, p.callback))
+            .unzip();
+        let (delete_reqs, delete_cbs): (Vec<_>, Vec<_>) = self
+            .deletes
+            .into_iter()
+            .map(|p| (p.request, p.callback))
+            .unzip();
+        let (dr_reqs, dr_cbs): (Vec<_>, Vec<_>) = self
+            .delete_ranges
+            .into_iter()
+            .map(|p| (p.request, p.callback))
+            .unzip();
+        (
+            proto::WriteRequest {
+                shard: Some(shard),
+                puts: put_reqs,
+                deletes: delete_reqs,
+                delete_ranges: dr_reqs,
+            },
+            WriteCallbacks {
+                puts: put_cbs,
+                deletes: delete_cbs,
+                delete_ranges: dr_cbs,
+            },
+        )
+    }
+}
+
+/// The callbacks of one in-flight write batch, completed FIFO from the shard's
+/// response stream.
+struct WriteCallbacks {
+    puts: Vec<oneshot::Sender<Result<proto::PutResponse, OxiaError>>>,
+    deletes: Vec<oneshot::Sender<Result<proto::DeleteResponse, OxiaError>>>,
+    delete_ranges: Vec<oneshot::Sender<Result<proto::DeleteRangeResponse, OxiaError>>>,
+}
+
+impl WriteCallbacks {
+    fn complete(self, response: proto::WriteResponse) {
+        complete_all(self.puts, response.puts, "put");
+        complete_all(self.deletes, response.deletes, "delete");
+        complete_all(self.delete_ranges, response.delete_ranges, "delete_range");
+    }
+
+    fn fail(self, err: &OxiaError) {
+        fail_all(self.puts, err);
+        fail_all(self.deletes, err);
+        fail_all(self.delete_ranges, err);
+    }
+}
+
+struct WriteState {
+    queues: Queues<WriteBody>,
+    /// Callbacks of in-flight batches, FIFO-matched with stream responses.
+    /// `pending.len()` *is* the number of batches in flight.
+    pending: VecDeque<WriteCallbacks>,
+    /// Sender feeding the shard's write-stream RPC; `None` until the first
+    /// dispatch and after a stream failure.
+    stream_tx: Option<mpsc::UnboundedSender<proto::WriteRequest>>,
+    /// The response stream, parked here while the shard is idle (no pump).
+    parked: Option<Streaming<proto::WriteResponse>>,
+    pump_running: bool,
+}
+
+/// Batches write operations for one shard.
+pub(crate) struct WriteBatcher {
+    shard: i64,
+    deps: Arc<BatcherDeps>,
+    state: Mutex<WriteState>,
+    drained: Notify,
+}
+
+impl WriteBatcher {
+    pub(crate) fn new(shard: i64, deps: Arc<BatcherDeps>) -> Self {
+        WriteBatcher {
+            shard,
+            deps,
+            state: Mutex::new(WriteState {
+                queues: Queues::default(),
+                pending: VecDeque::new(),
+                stream_tx: None,
+                parked: None,
+                pump_running: false,
+            }),
+            drained: Notify::new(),
+        }
+    }
+
+    /// Queues a write. Infallible: failures are delivered through the
+    /// operation's callback.
+    pub(crate) fn add(self: &Arc<Self>, op: WriteOp) {
+        let size = op.size();
+        if size > self.deps.max_batch_size {
+            op.fail(OxiaError::RequestTooLarge);
+            return;
+        }
+        let mut spawn_flusher = false;
+        let rejected = {
+            let mut st = self.state.lock().expect("write batcher poisoned");
+            if st.queues.closed {
+                Some(op)
+            } else {
+                let capacity = self.deps.max_write_batches_in_flight;
+                let mut open = st.queues.open.take().unwrap_or_default();
+                // Seal the open batch when this operation would overflow it.
+                if !open.is_empty() && open.bytes + size > self.deps.max_batch_size {
+                    if st.pending.len() < capacity {
+                        self.dispatch_locked(&mut st, open);
+                    } else {
+                        st.queues.ready.push_back(open);
+                    }
+                    open = WriteBody::default();
+                }
+                open.push(op, size);
+                if open.count >= self.deps.max_requests_per_batch {
+                    if st.pending.len() < capacity {
+                        self.dispatch_locked(&mut st, open);
+                    } else {
+                        st.queues.ready.push_back(open);
+                    }
+                } else {
+                    st.queues.open = Some(open);
+                    // Adaptive dispatch: with window capacity available, flush
+                    // the open batch after one scheduler yield (coalescing
+                    // whatever arrives in the meantime). With the window
+                    // exhausted, do nothing — a completion will pick it up.
+                    if st.pending.len() < capacity && !st.queues.flush_scheduled {
+                        st.queues.flush_scheduled = true;
+                        spawn_flusher = true;
+                    }
+                }
+                None
+            }
+        };
+        if let Some(op) = rejected {
+            op.fail(OxiaError::Closed);
+            return;
+        }
+        if spawn_flusher {
+            let this = self.clone();
+            tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                this.flush_open();
+            });
+        }
+    }
+
+    /// Dispatches the open batch if the window still has capacity.
+    fn flush_open(self: &Arc<Self>) {
+        let mut st = self.state.lock().expect("write batcher poisoned");
+        st.queues.flush_scheduled = false;
+        self.fill_capacity(&mut st);
+    }
+
+    /// Dispatches queued batches (sealed first, then open) while the window
+    /// has capacity. Must be called with the state lock held.
+    fn fill_capacity(self: &Arc<Self>, st: &mut WriteState) {
+        while st.pending.len() < self.deps.max_write_batches_in_flight {
+            match st.queues.take_next() {
+                Some(body) => self.dispatch_locked(st, body),
+                None => break,
+            }
+        }
+    }
+
+    /// Hands a batch to the shard's write stream. The pending-callback push and
+    /// the stream send happen under the state lock, so response FIFO order and
+    /// server-side apply order both equal dispatch order.
+    fn dispatch_locked(self: &Arc<Self>, st: &mut WriteState, body: WriteBody) {
+        let (request, callbacks) = body.into_request(self.shard);
+        st.pending.push_back(callbacks);
+
+        if st.stream_tx.is_none() {
+            // Fresh stream: requests queue in the channel while the pump
+            // connects (tonic requires the first message to be queued before
+            // the RPC call for the stream to open).
+            let (tx, rx) = mpsc::unbounded_channel();
+            st.stream_tx = Some(tx);
+            st.parked = None;
+            st.pump_running = true;
+            let this = self.clone();
+            tokio::spawn(async move { this.run_pump(PumpInit::Connect(rx)).await });
+        } else if !st.pump_running {
+            let streaming = st
+                .parked
+                .take()
+                .expect("idle write stream must have a parked response stream");
+            st.pump_running = true;
+            let this = self.clone();
+            tokio::spawn(async move { this.run_pump(PumpInit::Resume(Box::new(streaming))).await });
+        }
+
+        if let Some(tx) = &st.stream_tx {
+            // The receiver lives until the pump's death path clears
+            // `stream_tx` under this same lock, so this send cannot fail.
+            let _ = tx.send(request);
+        }
+    }
+
+    async fn run_pump(self: Arc<Self>, init: PumpInit) {
+        let mut streaming = match init {
+            PumpInit::Resume(streaming) => *streaming,
+            PumpInit::Connect(rx) => match self.connect_stream(rx).await {
+                Ok(streaming) => streaming,
+                Err(err) => {
+                    self.pump_died(err);
+                    return;
+                }
+            },
+        };
+        loop {
+            let next = tokio::time::timeout(self.deps.request_timeout, streaming.next()).await;
+            let response = match next {
+                // No response within the request timeout while batches are in
+                // flight: the stream is wedged.
+                Err(_) => return self.pump_died(OxiaError::Timeout),
+                Ok(None) => {
+                    return self.pump_died(OxiaError::Disconnected(
+                        "write stream closed by server".to_string(),
+                    ));
+                }
+                Ok(Some(Err(status))) => return self.pump_died(OxiaError::from(status)),
+                Ok(Some(Ok(response))) => response,
+            };
+
+            let mut st = self.state.lock().expect("write batcher poisoned");
+            let Some(callbacks) = st.pending.pop_front() else {
+                warn!(shard = self.shard, "unexpected write response; ignoring");
+                continue;
+            };
+            // Release the window slot before completing callbacks, so the
+            // next batch is on the wire first.
+            self.fill_capacity(&mut st);
+            if st.pending.is_empty() {
+                // Shard idle: park the response stream and exit.
+                st.parked = Some(streaming);
+                st.pump_running = false;
+                let drained = st.queues.closed && st.queues.is_drained();
+                drop(st);
+                callbacks.complete(response);
+                if drained {
+                    self.drained.notify_waiters();
+                }
+                return;
+            }
+            drop(st);
+            callbacks.complete(response);
+        }
+    }
+
+    /// Opens the shard's write-stream RPC, feeding it the already-queued
+    /// requests in `rx`.
+    async fn connect_stream(
+        &self,
+        rx: UnboundedReceiver<proto::WriteRequest>,
+    ) -> Result<Streaming<proto::WriteResponse>, OxiaError> {
+        let leader = self
+            .deps
+            .shard_manager
+            .get_leader(self.shard)
+            .ok_or(OxiaError::LeaderNotFound { shard: self.shard })?;
+        let mut provider = self
+            .deps
+            .provider_manager
+            .get_provider(leader.service_address)
+            .await?;
+        let mut request = tonic::Request::new(UnboundedReceiverStream::new(rx));
+        let metadata = request.metadata_mut();
+        metadata.insert(
+            WRITE_STREAM_HEADER_NAMESPACE,
+            self.deps
+                .namespace
+                .parse()
+                .map_err(|_| OxiaError::InvalidArgument("namespace".to_string()))?,
+        );
+        metadata.insert(
+            WRITE_STREAM_HEADER_SHARD_ID,
+            self.shard
+                .to_string()
+                .parse()
+                .expect("shard id is valid metadata"),
+        );
+        Ok(provider.write_stream(request).await?.into_inner())
+    }
+
+    /// The stream failed (or could not be created): fail every in-flight
+    /// batch, drop the stream so the next dispatch creates a fresh one, and
+    /// redispatch what is still queued.
+    fn pump_died(self: &Arc<Self>, err: OxiaError) {
+        warn!(shard = self.shard, error = %err, "write stream failed");
+        let (failed, drained) = {
+            let mut st = self.state.lock().expect("write batcher poisoned");
+            st.pump_running = false;
+            st.stream_tx = None;
+            st.parked = None;
+            let failed: Vec<WriteCallbacks> = st.pending.drain(..).collect();
+            // Queued batches get a fresh stream; each batch fails at most once.
+            self.fill_capacity(&mut st);
+            let drained = st.queues.closed && st.queues.is_drained() && st.pending.is_empty();
+            (failed, drained)
+        };
+        for callbacks in failed {
+            callbacks.fail(&err);
+        }
+        if drained {
+            self.drained.notify_waiters();
+        }
+    }
+
+    fn is_drained(&self, st: &MutexGuard<'_, WriteState>) -> bool {
+        st.queues.is_drained() && st.pending.is_empty()
+    }
+
+    /// Flushes everything queued and waits (bounded) for in-flight batches to
+    /// complete, then tears the stream down. Late leftovers fail with
+    /// [`OxiaError::Closed`].
+    pub(crate) async fn close(self: &Arc<Self>) -> Result<(), OxiaError> {
+        {
+            let mut st = self.state.lock().expect("write batcher poisoned");
+            st.queues.closed = true;
+            // Drain fast: dispatch everything, ignoring the window bound (the
+            // stream ordering guarantee is unaffected).
+            while let Some(body) = st.queues.take_next() {
+                self.dispatch_locked(&mut st, body);
+            }
+        }
+        let deadline = tokio::time::Instant::now() + self.deps.request_timeout;
+        loop {
+            let notified = self.drained.notified();
+            {
+                let st = self.state.lock().expect("write batcher poisoned");
+                if self.is_drained(&st) {
+                    break;
+                }
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                let leftovers: Vec<WriteCallbacks> = {
+                    let mut st = self.state.lock().expect("write batcher poisoned");
+                    st.pending.drain(..).collect()
+                };
+                for callbacks in leftovers {
+                    callbacks.fail(&OxiaError::Closed);
+                }
+                break;
+            }
+        }
+        // Drop the stream: the request channel closes, the server completes
+        // the RPC, and any parked/pumping response stream winds down.
+        let mut st = self.state.lock().expect("write batcher poisoned");
+        st.stream_tx = None;
+        st.parked = None;
+        Ok(())
+    }
+}
+
+enum PumpInit {
+    Connect(UnboundedReceiver<proto::WriteRequest>),
+    Resume(Box<Streaming<proto::WriteResponse>>),
+}
+
+// ---------------------------------------------------------------------------
+// Read batching
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct ReadBody {
+    gets: Vec<PendingGet>,
+}
+
+struct ReadState {
+    queues: Queues<ReadBody>,
+    in_flight: usize,
+}
+
+/// Batches get operations for one shard. Reads have no byte accounting (the
+/// requests are small) and no ordering constraint: each batch is an
+/// independent `Read` RPC, up to `max_read_batches_in_flight` concurrently.
+pub(crate) struct ReadBatcher {
+    shard: i64,
+    deps: Arc<BatcherDeps>,
+    state: Mutex<ReadState>,
+    drained: Notify,
+}
+
+impl ReadBatcher {
+    pub(crate) fn new(shard: i64, deps: Arc<BatcherDeps>) -> Self {
+        ReadBatcher {
+            shard,
+            deps,
+            state: Mutex::new(ReadState {
+                queues: Queues::default(),
+                in_flight: 0,
+            }),
+            drained: Notify::new(),
+        }
+    }
+
+    /// Queues a get. Infallible: failures are delivered through the callback.
+    pub(crate) fn add(self: &Arc<Self>, get: PendingGet) {
+        let mut spawn_flusher = false;
+        let rejected = {
+            let mut st = self.state.lock().expect("read batcher poisoned");
+            if st.queues.closed {
+                Some(get)
+            } else {
+                let mut open = st.queues.open.take().unwrap_or_default();
+                open.gets.push(get);
+                if open.gets.len() >= self.deps.max_requests_per_batch {
+                    if st.in_flight < self.deps.max_read_batches_in_flight {
+                        self.dispatch_locked(&mut st, open);
+                    } else {
+                        st.queues.ready.push_back(open);
+                    }
+                } else {
+                    st.queues.open = Some(open);
+                    if st.in_flight < self.deps.max_read_batches_in_flight
+                        && !st.queues.flush_scheduled
+                    {
+                        st.queues.flush_scheduled = true;
+                        spawn_flusher = true;
+                    }
+                }
+                None
+            }
+        };
+        if let Some(get) = rejected {
+            let _ = get.callback.send(Err(OxiaError::Closed));
+            return;
+        }
+        if spawn_flusher {
+            let this = self.clone();
+            tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                this.flush_open();
+            });
+        }
+    }
+
+    fn flush_open(self: &Arc<Self>) {
+        let mut st = self.state.lock().expect("read batcher poisoned");
+        st.queues.flush_scheduled = false;
+        self.fill_capacity(&mut st);
+    }
+
+    fn fill_capacity(self: &Arc<Self>, st: &mut ReadState) {
+        while st.in_flight < self.deps.max_read_batches_in_flight {
+            match st.queues.take_next() {
+                Some(body) => self.dispatch_locked(st, body),
+                None => break,
+            }
+        }
+    }
+
+    fn dispatch_locked(self: &Arc<Self>, st: &mut ReadState, body: ReadBody) {
+        st.in_flight += 1;
+        let this = self.clone();
+        tokio::spawn(async move {
+            this.send_batch(body).await;
+            let drained = {
+                let mut st = this.state.lock().expect("read batcher poisoned");
+                st.in_flight -= 1;
+                this.fill_capacity(&mut st);
+                st.queues.closed && st.queues.is_drained() && st.in_flight == 0
+            };
+            if drained {
+                this.drained.notify_waiters();
+            }
+        });
+    }
+
+    async fn send_batch(&self, body: ReadBody) {
+        let (requests, callbacks): (Vec<_>, Vec<_>) = body
+            .gets
+            .into_iter()
+            .map(|p| (p.request, p.callback))
+            .unzip();
+
+        let leader = match self.deps.shard_manager.get_leader(self.shard) {
+            Some(node) => node,
+            None => {
+                fail_all(callbacks, &OxiaError::LeaderNotFound { shard: self.shard });
+                return;
+            }
+        };
+        let mut provider = match self
+            .deps
+            .provider_manager
+            .get_provider(leader.service_address)
+            .await
+        {
+            Ok(provider) => provider,
+            Err(err) => {
+                fail_all(callbacks, &err);
+                return;
+            }
+        };
+        let mut request = tonic::Request::new(proto::ReadRequest {
+            shard: Some(self.shard),
+            gets: requests,
+        });
+        request.set_timeout(self.deps.request_timeout);
+        match provider.read(request).await {
+            Ok(response) => receive_all(response.into_inner(), callbacks).await,
+            Err(status) => fail_all(callbacks, &OxiaError::from(status)),
+        }
+    }
+
+    /// Flushes everything queued and waits (bounded) for in-flight reads.
+    pub(crate) async fn close(self: &Arc<Self>) -> Result<(), OxiaError> {
+        {
+            let mut st = self.state.lock().expect("read batcher poisoned");
+            st.queues.closed = true;
+            while let Some(body) = st.queues.take_next() {
+                self.dispatch_locked(&mut st, body);
+            }
+        }
+        let deadline = tokio::time::Instant::now() + self.deps.request_timeout;
+        loop {
+            let notified = self.drained.notified();
+            {
+                let st = self.state.lock().expect("read batcher poisoned");
+                if st.queues.is_drained() && st.in_flight == 0 {
+                    break;
+                }
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                debug!(shard = self.shard, "read batcher close timed out");
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Completes get callbacks in order from a `Read` RPC's response stream.
+async fn receive_all(
+    mut streaming: Streaming<proto::ReadResponse>,
+    callbacks: Vec<oneshot::Sender<Result<proto::GetResponse, OxiaError>>>,
+) {
+    let mut callbacks = callbacks.into_iter();
+    while let Some(next) = streaming.next().await {
+        match next {
+            Ok(read_response) => {
+                for get_response in read_response.gets {
+                    match callbacks.next() {
+                        Some(callback) => {
+                            let _ = callback.send(Ok(get_response));
+                        }
+                        None => {
+                            warn!("server returned more get responses than requested");
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(status) => {
+                fail_all(callbacks, &OxiaError::from(status));
+                return;
+            }
+        }
+    }
+    // The stream ended before every get was answered.
+    fail_all(
+        callbacks,
+        &OxiaError::Decode("missing get response from server".to_string()),
+    );
+}
+
+/// Creates a `Pending` write op and its receiver in one step.
+pub(crate) fn pending_write<Req, Resp>(
+    request: Req,
+    wrap: fn(Pending<Req, Resp>) -> WriteOp,
+) -> (WriteOp, oneshot::Receiver<Result<Resp, OxiaError>>) {
+    let (pending, rx) = Pending::new(request);
+    (wrap(pending), rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    fn put_op(
+        key: &str,
+        value: &[u8],
+    ) -> (
+        WriteOp,
+        oneshot::Receiver<Result<proto::PutResponse, OxiaError>>,
+    ) {
+        let request = proto::PutRequest {
+            key: key.to_string(),
+            value: Bytes::copy_from_slice(value),
+            ..Default::default()
+        };
+        pending_write(request, WriteOp::Put)
+    }
+
+    #[test]
+    fn write_op_size_estimates() {
+        let (op, _rx) = put_op("key", b"value");
+        assert_eq!(op.size(), 3 + 5);
+
+        let (delete, _rx) = pending_write(
+            proto::DeleteRequest {
+                key: "abcd".to_string(),
+                ..Default::default()
+            },
+            WriteOp::Delete,
+        );
+        assert_eq!(delete.size(), 4);
+
+        let (dr, _rx) = pending_write(
+            proto::DeleteRangeRequest {
+                start_inclusive: "ab".to_string(),
+                end_exclusive: "abc".to_string(),
+            },
+            WriteOp::DeleteRange,
+        );
+        assert_eq!(dr.size(), 5);
+    }
+
+    #[test]
+    fn queues_dispatch_order_is_sealed_then_open() {
+        let mut queues: Queues<i32> = Queues::default();
+        queues.ready.push_back(1);
+        queues.ready.push_back(2);
+        queues.open = Some(3);
+        assert_eq!(queues.take_next(), Some(1));
+        assert_eq!(queues.take_next(), Some(2));
+        assert_eq!(queues.take_next(), Some(3));
+        assert_eq!(queues.take_next(), None);
+        assert!(queues.is_drained());
+    }
+
+    #[test]
+    fn write_body_accounting() {
+        let mut body = WriteBody::default();
+        let (op, _rx) = put_op("k", b"0123456789");
+        let size = op.size();
+        body.push(op, size);
+        assert_eq!(body.count, 1);
+        assert_eq!(body.bytes, 11);
+        let (request, callbacks) = body.into_request(7);
+        assert_eq!(request.shard, Some(7));
+        assert_eq!(request.puts.len(), 1);
+        assert_eq!(callbacks.puts.len(), 1);
+    }
+
+    fn test_deps(max_batch_size: usize) -> Arc<BatcherDeps> {
+        // Managers are only touched at dispatch time; the rejection paths
+        // exercised here never dispatch. Use an address nothing connects to.
+        Arc::new(BatcherDeps {
+            namespace: "default".to_string(),
+            shard_manager: ShardManager::detached_for_tests(),
+            provider_manager: Arc::new(ProviderManager::new(Duration::from_secs(1))),
+            max_batch_size,
+            max_requests_per_batch: 1000,
+            max_write_batches_in_flight: 4,
+            max_read_batches_in_flight: 4,
+            request_timeout: Duration::from_secs(1),
+        })
+    }
+
+    #[tokio::test]
+    async fn oversized_write_is_rejected_before_batching() {
+        let batcher = Arc::new(WriteBatcher::new(0, test_deps(16)));
+        let (op, rx) = put_op("key", &[0u8; 64]);
+        batcher.add(op);
+        let err = rx.await.expect("callback must fire").unwrap_err();
+        assert!(matches!(err, OxiaError::RequestTooLarge));
+        // Nothing was queued or dispatched.
+        let st = batcher.state.lock().unwrap();
+        assert!(st.queues.is_drained());
+        assert!(st.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn writes_after_close_fail_with_closed() {
+        let batcher = Arc::new(WriteBatcher::new(0, test_deps(1024)));
+        batcher.close().await.unwrap();
+        let (op, rx) = put_op("key", b"value");
+        batcher.add(op);
+        let err = rx.await.expect("callback must fire").unwrap_err();
+        assert!(matches!(err, OxiaError::Closed));
+    }
+
+    #[tokio::test]
+    async fn reads_after_close_fail_with_closed() {
+        let batcher = Arc::new(ReadBatcher::new(0, test_deps(1024)));
+        batcher.close().await.unwrap();
+        let (pending, rx) = Pending::new(proto::GetRequest::default());
+        batcher.add(pending);
+        let err = rx.await.expect("callback must fire").unwrap_err();
+        assert!(matches!(err, OxiaError::Closed));
+    }
+}

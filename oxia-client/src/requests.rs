@@ -3,10 +3,9 @@
 //! [`IntoFuture`]), or call an alternate finisher such as
 //! [`ListBuilder::stream`].
 
-use crate::batch_manager::Batcher;
+use crate::batcher::WriteOp;
 use crate::client::{OxiaClient, check_status};
 use crate::errors::OxiaError;
-use crate::operations::Operation;
 use crate::proto;
 use crate::streams::{ListStream, Notifications, RangeScanStream, SequenceUpdates};
 use crate::types::{ComparisonType, GetResult, PutResult, VERSION_ID_NOT_EXISTS};
@@ -119,9 +118,7 @@ impl PutBuilder {
             override_version_id: None,
             override_modifications_count: None,
         };
-        let response = client
-            .submit(Batcher::Write, shard, request, Operation::Put)
-            .await?;
+        let response = client.submit_write(shard, request, WriteOp::Put).await?;
         check_status(response.status)?;
         let version = response
             .version
@@ -208,9 +205,7 @@ impl GetBuilder {
         match self.partition_key {
             Some(partition_key) => {
                 let shard = client.shard_for(&partition_key)?;
-                let response = client
-                    .submit(Batcher::Read, shard, request, Operation::Get)
-                    .await?;
+                let response = client.submit_get(shard, request).await?;
                 check_status(response.status)?;
                 GetResult::from_proto(response, Some(self.key))
             }
@@ -273,9 +268,7 @@ impl DeleteBuilder {
             key: self.key,
             expected_version_id: self.expected_version_id,
         };
-        let response = client
-            .submit(Batcher::Write, shard, request, Operation::Delete)
-            .await?;
+        let response = client.submit_write(shard, request, WriteOp::Delete).await?;
         check_status(response.status)
     }
 }
@@ -332,7 +325,7 @@ impl DeleteRangeBuilder {
             Some(partition_key) => {
                 let shard = client.shard_for(&partition_key)?;
                 let response = client
-                    .submit(Batcher::Write, shard, request, Operation::DeleteRange)
+                    .submit_write(shard, request, WriteOp::DeleteRange)
                     .await?;
                 check_status(response.status)
             }
