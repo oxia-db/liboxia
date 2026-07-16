@@ -1877,3 +1877,135 @@ async fn test_operations_survive_server_restart() {
     let _container = restarter.await.unwrap();
     client.close().await.unwrap();
 }
+
+// ============================================================
+// Failure-mode gate (P1-G)
+// ============================================================
+//
+// This suite exercises the client's resilience end-to-end against a real
+// server. What is covered here:
+//   - cluster-down fail-fast: `build_fails_fast_when_cluster_unreachable`
+//   - leader restart mid-operation: `test_operations_survive_server_restart`
+//   - leader restart under concurrent load: below
+//   - notification resume after reconnect: below
+//   - session expiry + ephemeral cleanup on close: `test_ephemeral_keys`
+//
+// Two gate scenarios cannot be driven against the `oxia standalone` container
+// and are covered at the unit level instead:
+//   - Shard split/merge under load: the standalone exposes only the public
+//     service (port 6648); it runs no coordinator/admin service, so the
+//     `OxiaAdmin.SplitShard` RPC is unreachable and no live split can be
+//     triggered. The re-routing logic (SHARD_NOT_FOUND -> re-hash + resubmit)
+//     is unit-tested in `client.rs`, matching how the Go/Java clients test it.
+//   - Forced session expiry: the server persists sessions and, on restart,
+//     recovers them with a fresh heartbeat timer while the client transparently
+//     resumes keep-alive — so `SESSION_NOT_FOUND` cannot be provoked through the
+//     public API without a failure-injection hook the standalone does not offer.
+//     The recreate-on-expiry path (keep-alive marks the session dead -> next
+//     ephemeral op opens a fresh session) is covered by the session-manager
+//     logic added in P1-6/P1-7.
+
+/// Receives notifications until a `KeyCreated` for `key` arrives, ignoring any
+/// others, or panics after `within`.
+async fn expect_key_created(rx: &mut oxia::Notifications, key: &str, within: Duration) {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(Notification::KeyCreated { key: k, .. })) if k == key => return,
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("notification stream closed before delivering '{key}'"),
+            Err(_) => panic!("timed out waiting for notification '{key}'"),
+        }
+    }
+}
+
+/// P1-G: a notification subscription must survive a server outage. Each
+/// per-shard listener reconnects and resumes from its last delivered offset, so
+/// a change made after the server returns is still delivered.
+#[tokio::test]
+async fn test_notifications_resume_after_server_restart() {
+    let (container, address) = start_oxia_fixed_port().await;
+    let client = OxiaClientBuilder::new()
+        .service_address(address)
+        .request_timeout(Duration::from_secs(60))
+        .build()
+        .await
+        .unwrap();
+
+    let mut rx = client.notifications().await.unwrap();
+
+    // A change before the outage is delivered normally.
+    client
+        .put("notif-restart/before", b"v1".to_vec())
+        .await
+        .unwrap();
+    expect_key_created(&mut rx, "notif-restart/before", Duration::from_secs(10)).await;
+
+    // Bounce the server underneath the subscription.
+    container.stop().await.expect("stop oxia");
+    let restarter = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        container.start().await.expect("restart oxia");
+        container
+    });
+
+    // A change after the server returns must still reach the subscription: the
+    // listener reconnected and resumed from where it left off.
+    client
+        .put("notif-restart/after", b"v2".to_vec())
+        .await
+        .unwrap();
+    expect_key_created(&mut rx, "notif-restart/after", Duration::from_secs(30)).await;
+
+    let _container = restarter.await.unwrap();
+    client.close().await.unwrap();
+}
+
+/// P1-G: a burst of writes already in flight when the leader restarts must all
+/// ride through the outage on the client's retries — none dropped, none stuck.
+#[tokio::test]
+async fn test_writes_survive_restart_under_concurrent_load() {
+    let (container, address) = start_oxia_fixed_port().await;
+    let client = OxiaClientBuilder::new()
+        .service_address(address)
+        .request_timeout(Duration::from_secs(60))
+        .build()
+        .await
+        .unwrap();
+
+    // Kick off a burst of concurrent writes...
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..50 {
+        let client = client.clone();
+        tasks.spawn(async move {
+            client
+                .put(format!("load/{i:02}"), format!("v{i}").into_bytes())
+                .await
+        });
+    }
+
+    // ...and bounce the server while they are in flight.
+    container.stop().await.expect("stop oxia");
+    let restarter = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        container.start().await.expect("restart oxia");
+        container
+    });
+
+    // Every write must eventually succeed.
+    let mut succeeded = 0;
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap().unwrap();
+        succeeded += 1;
+    }
+    assert_eq!(succeeded, 50);
+
+    let _container = restarter.await.unwrap();
+
+    // Spot-check that writes actually landed with the right values.
+    for i in [0usize, 25, 49] {
+        let got = client.get(format!("load/{i:02}")).await.unwrap();
+        assert_eq!(got.value.as_deref(), Some(format!("v{i}").as_bytes()));
+    }
+    client.close().await.unwrap();
+}
