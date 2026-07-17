@@ -1,0 +1,59 @@
+name: Release-plz
+
+on:
+  push:
+    branches: [main]
+
+# Never run more than one release-plz invocation for a branch at a time.
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Publish any version merged from a release PR, then tag it and cut a GitHub
+  # Release with notes generated from the commit history.
+  release:
+    name: Release
+    if: github.repository == 'oxia-db/oxia-client-rust'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATE_TOKEN }}
+
+  # Keep a "release" PR open that bumps the version from the conventional
+  # commits merged since the last release. Merging it triggers the release job.
+  release-pr:
+    name: Release PR
+    if: github.repository == 'oxia-db/oxia-client-rust'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATE_TOKEN }}

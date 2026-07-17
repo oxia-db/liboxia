@@ -1,42 +1,45 @@
 # Release process
 
-`oxia-client` is published to [crates.io](https://crates.io/crates/oxia-client) and announced as
-[GitHub Releases](https://github.com/oxia-db/oxia-client-rust/releases).
+`oxia-client` is released to [crates.io](https://crates.io/crates/oxia-client) and announced as
+[GitHub Releases](https://github.com/oxia-db/oxia-client-rust/releases). Releases are automated
+with [release-plz](https://release-plz.dev).
 
 **Release notes live in GitHub Releases** — this repository intentionally keeps no in-repo
-`CHANGELOG.md`.
+`CHANGELOG.md`. release-plz generates the release notes from the commit history, so land changes
+with [Conventional Commits](https://www.conventionalcommits.org) messages (`feat:` for a minor
+bump, `fix:` for a patch, `feat!:` / `BREAKING CHANGE:` for a major).
 
-## Steps
+## How it works
 
-1. **Bump the version.** Update `version` in `oxia-client/Cargo.toml` and
-   `oxia-client-ffi/Cargo.toml` (keep the two crates in lockstep) and refresh `Cargo.lock`
-   (`cargo build`). Open a PR and merge it to `main`.
+The [`Release-plz`](./.github/workflows/release-plz.yml) workflow runs on every push to `main`:
 
-2. **Tag the release** on the merge commit and push the tag:
+1. **Release PR.** release-plz keeps a PR open that bumps `oxia-client`'s version according to the
+   conventional commits merged since the last release. Review it like any other PR.
+2. **Publish.** Merging the release PR makes the workflow `cargo publish` `oxia-client`, push a
+   `vX.Y.Z` tag, and create a GitHub Release with generated notes.
+3. **(Optional) Curate.** Edit the generated GitHub Release to add highlights or migration notes.
 
-   ```shell
-   git tag vX.Y.Z
-   git push origin vX.Y.Z
-   ```
+Only `oxia-client` is released. The `oxia-client-ffi` shim and the `oxia-perf` tool are internal
+(`publish = false`, and `release = false` in [`release-plz.toml`](./release-plz.toml)), so
+release-plz never publishes, tags, or creates a GitHub Release for them — though it may bump the
+FFI's version to keep it in step with `oxia-client`.
 
-   Pushing a `v*` tag triggers the
-   [`release-cargo.yml`](./.github/workflows/release-cargo.yml) workflow, which runs the full
-   test suite and then `cargo publish`es `oxia-client`.
+## Required setup (one-time)
 
-3. **Publish the GitHub Release.** Draft a release for the tag (GitHub can auto-generate notes
-   from the merged PRs) and curate it into highlights, notable changes, and any migration notes,
-   then publish it.
+- **`CRATE_TOKEN` repository secret** — a crates.io API token with the **publish-update** scope
+  (plus **publish-new** for a brand-new crate name), scoped to include `oxia-client`. It is passed
+  to release-plz as `CARGO_REGISTRY_TOKEN`; a token lacking these scopes fails publishing with
+  `403 Forbidden`.
+- **Repository setting** — under *Settings → Actions → General → Workflow permissions*, enable
+  *"Allow GitHub Actions to create and approve pull requests"* so the release PR can be opened.
+- The workflow uses the built-in `GITHUB_TOKEN`. Because PRs opened by `GITHUB_TOKEN` do not
+  trigger other workflows, the release PR will not run CI on its own; to get CI on it, supply a
+  [Personal Access Token or GitHub App token](https://release-plz.dev/docs/github/token) as the
+  `release-pr` job's `GITHUB_TOKEN`.
 
 ## Versioning
 
-The crate follows [Semantic Versioning](https://semver.org). CI runs
+The crate follows [Semantic Versioning](https://semver.org). `ci.yml` runs
 [`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks) against the latest
-published release to catch accidental breaking changes; the check self-arms once the first
-version is on crates.io.
-
-## crates.io token
-
-The publish step authenticates with the `CRATE_TOKEN` repository secret. It must be a crates.io
-API token with the **publish-new** scope (required to publish a crate name for the first time)
-and **publish-update** scope. If the token is crate-scoped, it must include `oxia-client`. A token
-lacking these scopes fails the publish with `403 Forbidden`.
+published release to catch accidental breaking changes; release-plz's own semver check is disabled
+in `release-plz.toml` to avoid duplicating it.
