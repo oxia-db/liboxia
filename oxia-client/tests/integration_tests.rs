@@ -2009,3 +2009,91 @@ async fn test_writes_survive_restart_under_concurrent_load() {
     }
     client.close().await.unwrap();
 }
+
+// ============================================================
+// Metrics (otel feature)
+// ============================================================
+
+/// With the `otel` feature enabled, operations report through the configured
+/// OpenTelemetry meter provider under the `oxia_client` meter, mirroring the Go
+/// client's instrument names and `type` attribute.
+///
+/// Runs on a multi-thread runtime: the OpenTelemetry `PeriodicReader`'s
+/// `force_flush` blocks the caller until its background worker replies, which
+/// would deadlock a single-threaded runtime.
+#[cfg(feature = "otel")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_metrics_recorded_through_meter_provider() {
+    use opentelemetry_sdk::metrics::data::Histogram;
+    use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+    use opentelemetry_sdk::runtime;
+    use opentelemetry_sdk::testing::metrics::InMemoryMetricExporter;
+
+    let (_container, address) = start_oxia().await;
+
+    let exporter = InMemoryMetricExporter::default();
+    let reader = PeriodicReader::builder(exporter.clone(), runtime::Tokio).build();
+    let provider = SdkMeterProvider::builder().with_reader(reader).build();
+
+    let client = OxiaClientBuilder::new()
+        .service_address(address)
+        .request_timeout(Duration::from_secs(10))
+        .meter_provider(&provider)
+        .build()
+        .await
+        .unwrap();
+
+    // Exercise each op type so every `type` attribute is emitted.
+    client.put("metrics/key", b"hello".to_vec()).await.unwrap();
+    client.get("metrics/key").await.unwrap();
+    client.delete("metrics/key").await.unwrap();
+    client
+        .delete_range("metrics/".to_string(), "metrics/~".to_string())
+        .await
+        .unwrap();
+    client.close().await.unwrap();
+
+    provider.force_flush().unwrap();
+
+    let resource_metrics = exporter.get_finished_metrics().unwrap();
+    let oxia_scope = resource_metrics
+        .iter()
+        .flat_map(|rm| &rm.scope_metrics)
+        .find(|sm| sm.scope.name() == "oxia_client")
+        .expect("the oxia_client meter scope must be present");
+
+    let names: Vec<&str> = oxia_scope.metrics.iter().map(|m| m.name.as_ref()).collect();
+    assert!(
+        names.contains(&"oxia_client_op"),
+        "expected an oxia_client_op instrument, got {names:?}"
+    );
+    assert!(
+        names.contains(&"oxia_client_op_value"),
+        "expected an oxia_client_op_value instrument, got {names:?}"
+    );
+
+    // The op-latency histogram must carry a `type` attribute for every op run.
+    let op = oxia_scope
+        .metrics
+        .iter()
+        .find(|m| m.name == "oxia_client_op")
+        .unwrap();
+    let histogram = op
+        .data
+        .as_any()
+        .downcast_ref::<Histogram<f64>>()
+        .expect("oxia_client_op is an f64 histogram");
+    let mut types: Vec<String> = histogram
+        .data_points
+        .iter()
+        .filter_map(|dp| {
+            dp.attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == "type")
+                .map(|kv| kv.value.as_str().into_owned())
+        })
+        .collect();
+    types.sort();
+    types.dedup();
+    assert_eq!(types, ["delete", "delete_range", "get", "put"]);
+}

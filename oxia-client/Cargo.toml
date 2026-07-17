@@ -30,9 +30,15 @@ bytes = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
 tonic-types = { workspace = true }
+opentelemetry = { workspace = true, optional = true }
+
+[features]
+# OpenTelemetry metrics (meter `oxia_client`); off by default for a zero-cost build.
+otel = ["dep:opentelemetry"]
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["metrics", "testing", "rt-tokio"] }
 testcontainers = "0.23"
 testcontainers-modules = "0.11"
 tokio-test = "0.4"

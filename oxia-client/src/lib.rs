@@ -128,9 +128,16 @@
 //!
 //! # Cargo features
 //!
-//! This crate exposes no optional Cargo features; all functionality is always
-//! compiled in. (TLS, token authentication, and OpenTelemetry metrics are
-//! planned, and will be documented here when they land.)
+//! - **`otel`** *(off by default)* — records client metrics through
+//!   [OpenTelemetry](https://opentelemetry.io/). With the feature enabled,
+//!   per-operation latency and value sizes are reported under the `oxia_client`
+//!   meter; attach a meter provider with
+//!   [`OxiaClientBuilder::meter_provider`], or let the client fall back to the
+//!   global provider. Without it, metrics recording compiles to a zero-cost
+//!   no-op.
+//!
+//! TLS and token authentication are planned, and will be documented here when
+//! they land.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -148,6 +155,7 @@ mod client_options;
 mod errors;
 mod hash;
 mod key;
+mod metrics;
 mod notification_manager;
 mod operations;
 mod provider_manager;

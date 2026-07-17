@@ -141,49 +141,58 @@ impl PutBuilder {
             ..
         } = self;
         let identity = client.identity().to_string();
+        let value_size = value.len();
+        let start = std::time::Instant::now();
         // Re-resolve the shard and (for ephemeral puts) its session on each
         // attempt, so a split/merge re-routes to the new shard.
-        let response = client
-            .with_shard_retry(&routing_key, |shard| {
-                let client = client.clone();
-                let key = key.clone();
-                let value = value.clone();
-                let partition_key = partition_key.clone();
-                let sequence_key_deltas = sequence_key_deltas.clone();
-                let secondary_indexes = secondary_indexes.clone();
-                let identity = identity.clone();
-                async move {
-                    let session_id = if ephemeral {
-                        Some(client.session_id_for(shard).await?)
-                    } else {
-                        None
-                    };
-                    let request = proto::PutRequest {
-                        key,
-                        value,
-                        expected_version_id,
-                        session_id,
-                        client_identity: Some(identity),
-                        partition_key,
-                        sequence_key_delta: sequence_key_deltas,
-                        secondary_indexes,
-                        override_version_id: None,
-                        override_modifications_count: None,
-                    };
-                    client.submit_write(shard, request, WriteOp::Put).await
-                }
+        let op_result = async {
+            let response = client
+                .with_shard_retry(&routing_key, |shard| {
+                    let client = client.clone();
+                    let key = key.clone();
+                    let value = value.clone();
+                    let partition_key = partition_key.clone();
+                    let sequence_key_deltas = sequence_key_deltas.clone();
+                    let secondary_indexes = secondary_indexes.clone();
+                    let identity = identity.clone();
+                    async move {
+                        let session_id = if ephemeral {
+                            Some(client.session_id_for(shard).await?)
+                        } else {
+                            None
+                        };
+                        let request = proto::PutRequest {
+                            key,
+                            value,
+                            expected_version_id,
+                            session_id,
+                            client_identity: Some(identity),
+                            partition_key,
+                            sequence_key_delta: sequence_key_deltas,
+                            secondary_indexes,
+                            override_version_id: None,
+                            override_modifications_count: None,
+                        };
+                        client.submit_write(shard, request, WriteOp::Put).await
+                    }
+                })
+                .await?;
+            check_status(response.status)?;
+            let version = response
+                .version
+                .ok_or_else(|| OxiaError::Decode("missing version in put response".to_string()))?;
+            Ok(PutResult {
+                // The server returns the key only when it generated it
+                // (sequential keys).
+                key: response.key.unwrap_or(key),
+                version: version.into(),
             })
-            .await?;
-        check_status(response.status)?;
-        let version = response
-            .version
-            .ok_or_else(|| OxiaError::Decode("missing version in put response".to_string()))?;
-        Ok(PutResult {
-            // The server returns the key only when it generated it
-            // (sequential keys).
-            key: response.key.unwrap_or(key),
-            version: version.into(),
-        })
+        }
+        .await;
+        client
+            .metrics()
+            .record_op("put", start.elapsed(), Some(value_size), op_result.is_ok());
+        op_result
     }
 }
 
@@ -262,20 +271,32 @@ impl GetBuilder {
             comparison_type: self.comparison.to_proto() as i32,
             secondary_index_name: self.secondary_index_name,
         };
-        if single_shard {
-            let route_key = self.partition_key.unwrap_or_else(|| self.key.clone());
-            let response = client
-                .with_shard_retry(&route_key, |shard| {
-                    let client = client.clone();
-                    let request = request.clone();
-                    async move { client.submit_get(shard, request).await }
-                })
-                .await?;
-            check_status(response.status)?;
-            GetResult::from_proto(response, Some(self.key))
-        } else {
-            client.broadcast_get(request, self.comparison).await
+        let start = std::time::Instant::now();
+        let op_result: Result<GetResult, OxiaError> = async {
+            if single_shard {
+                let route_key = self.partition_key.unwrap_or_else(|| self.key.clone());
+                let response = client
+                    .with_shard_retry(&route_key, |shard| {
+                        let client = client.clone();
+                        let request = request.clone();
+                        async move { client.submit_get(shard, request).await }
+                    })
+                    .await?;
+                check_status(response.status)?;
+                GetResult::from_proto(response, Some(self.key))
+            } else {
+                client.broadcast_get(request, self.comparison).await
+            }
         }
+        .await;
+        let value_size = op_result
+            .as_ref()
+            .ok()
+            .and_then(|r| r.value.as_ref().map(|v| v.len()));
+        client
+            .metrics()
+            .record_op("get", start.elapsed(), value_size, op_result.is_ok());
+        op_result
     }
 }
 
@@ -351,14 +372,22 @@ impl DeleteBuilder {
             key: self.key,
             expected_version_id: self.expected_version_id,
         };
-        let response = client
-            .with_shard_retry(&routing_key, |shard| {
-                let client = client.clone();
-                let request = request.clone();
-                async move { client.submit_write(shard, request, WriteOp::Delete).await }
-            })
-            .await?;
-        check_status(response.status)
+        let start = std::time::Instant::now();
+        let op_result = async {
+            let response = client
+                .with_shard_retry(&routing_key, |shard| {
+                    let client = client.clone();
+                    let request = request.clone();
+                    async move { client.submit_write(shard, request, WriteOp::Delete).await }
+                })
+                .await?;
+            check_status(response.status)
+        }
+        .await;
+        client
+            .metrics()
+            .record_op("delete", start.elapsed(), None, op_result.is_ok());
+        op_result
     }
 }
 
@@ -410,23 +439,31 @@ impl DeleteRangeBuilder {
             start_inclusive: self.min_key_inclusive,
             end_exclusive: self.max_key_exclusive,
         };
-        match self.partition_key {
-            Some(partition_key) => {
-                let response = client
-                    .with_shard_retry(&partition_key, |shard| {
-                        let client = client.clone();
-                        let request = request.clone();
-                        async move {
-                            client
-                                .submit_write(shard, request, WriteOp::DeleteRange)
-                                .await
-                        }
-                    })
-                    .await?;
-                check_status(response.status)
+        let start = std::time::Instant::now();
+        let op_result = async {
+            match self.partition_key {
+                Some(partition_key) => {
+                    let response = client
+                        .with_shard_retry(&partition_key, |shard| {
+                            let client = client.clone();
+                            let request = request.clone();
+                            async move {
+                                client
+                                    .submit_write(shard, request, WriteOp::DeleteRange)
+                                    .await
+                            }
+                        })
+                        .await?;
+                    check_status(response.status)
+                }
+                None => client.broadcast_delete_range(request).await,
             }
-            None => client.broadcast_delete_range(request).await,
         }
+        .await;
+        client
+            .metrics()
+            .record_op("delete_range", start.elapsed(), None, op_result.is_ok());
+        op_result
     }
 }
 

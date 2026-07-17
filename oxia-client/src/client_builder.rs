@@ -48,6 +48,8 @@ pub struct OxiaClientBuilder {
     session_timeout: Option<Duration>,
     session_keep_alive: Option<Duration>,
     request_timeout: Option<Duration>,
+    #[cfg(feature = "otel")]
+    meter: Option<opentelemetry::metrics::Meter>,
 }
 
 impl OxiaClientBuilder {
@@ -128,6 +130,15 @@ impl OxiaClientBuilder {
         self
     }
 
+    /// Records client metrics through the given OpenTelemetry meter provider,
+    /// under the meter named `oxia_client`. When unset, the global meter
+    /// provider is used. Requires the `otel` feature.
+    #[cfg(feature = "otel")]
+    pub fn meter_provider(mut self, provider: &impl opentelemetry::metrics::MeterProvider) -> Self {
+        self.meter = Some(crate::metrics::meter_from_provider(provider));
+        self
+    }
+
     fn assemble_options(self) -> OxiaClientOptions {
         let mut options = OxiaClientOptions::default();
         if let Some(service_address) = self.service_address {
@@ -171,13 +182,17 @@ impl OxiaClientBuilder {
     /// unreachable, the namespace does not exist, or the first shard
     /// assignments cannot be obtained.
     pub async fn build(self) -> Result<OxiaClient, OxiaError> {
+        #[cfg(feature = "otel")]
+        let metrics = crate::metrics::Metrics::new(self.meter.clone());
+        #[cfg(not(feature = "otel"))]
+        let metrics = crate::metrics::Metrics;
         let options = self.assemble_options();
         if options.max_write_batches_in_flight == 0 || options.max_read_batches_in_flight == 0 {
             return Err(OxiaError::InvalidArgument(
                 "max batches in flight must be at least 1".to_string(),
             ));
         }
-        OxiaClient::new(options).await
+        OxiaClient::new(options, metrics).await
     }
 }
 
