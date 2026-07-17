@@ -19,8 +19,10 @@ The [`Release-plz`](./.github/workflows/release-plz.yml) workflow runs on every 
    `vX.Y.Z` tag, and create a GitHub Release with generated notes.
 3. **(Optional) Curate.** Edit the generated GitHub Release to add highlights or migration notes.
 
-Only `oxia-client` is released; the `oxia-client-ffi` shim and the `oxia-perf` tool are internal
-(`publish = false`) and are ignored by release-plz (see [`release-plz.toml`](./release-plz.toml)).
+Only `oxia-client` is released. The `oxia-client-ffi` shim and the `oxia-perf` tool are internal
+(`publish = false`, and `release = false` in [`release-plz.toml`](./release-plz.toml)), so
+release-plz never publishes, tags, or creates a GitHub Release for them — though it may bump the
+FFI's version to keep it in step with `oxia-client`.
 
 ## Required setup (one-time)
 
