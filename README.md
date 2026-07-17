@@ -97,6 +97,9 @@ the legacy `io.streamnative.oxia.proto` service.
   `oxia-client`, imported as `use oxia::…`).
 - **[oxia-client-ffi](./oxia-client-ffi)** — a C Foreign Function Interface over `oxia-client`,
   exposing it to C/C++ applications.
+- **[oxia-perf](./oxia-perf)** — a load-generation and latency-measurement CLI (like the Go and
+  Java SDKs' perf tools): drives a configurable read/write mix at a target rate and reports
+  throughput and latency percentiles. Run `cargo run -p oxia-perf -- --help`.
 
 ## Documentation
 

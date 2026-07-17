@@ -1,0 +1,22 @@
+[package]
+name = "oxia-perf"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A load-generation and latency-measurement CLI for the Oxia Rust client."
+license = "Apache-2.0"
+repository = "https://github.com/oxia-db/oxia-client-rust"
+publish = false
+
+[[bin]]
+name = "oxia-perf"
+path = "src/main.rs"
+
+[dependencies]
+oxia-client = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+hdrhistogram = { workspace = true }
+rand = { workspace = true }
