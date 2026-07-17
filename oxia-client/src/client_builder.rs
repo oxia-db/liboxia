@@ -134,6 +134,7 @@ impl OxiaClientBuilder {
     /// under the meter named `oxia_client`. When unset, the global meter
     /// provider is used. Requires the `otel` feature.
     #[cfg(feature = "otel")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "otel")))]
     pub fn meter_provider(mut self, provider: &impl opentelemetry::metrics::MeterProvider) -> Self {
         self.meter = Some(crate::metrics::meter_from_provider(provider));
         self

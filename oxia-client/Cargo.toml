@@ -36,6 +36,12 @@ opentelemetry = { workspace = true, optional = true }
 # OpenTelemetry metrics (meter `oxia_client`); off by default for a zero-cost build.
 otel = ["dep:opentelemetry"]
 
+# Build docs.rs with all optional features so the `otel` API is documented,
+# with "Available on crate feature otel" badges (see the `docsrs` cfg in lib.rs).
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["metrics", "testing", "rt-tokio"] }
