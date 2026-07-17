@@ -77,9 +77,11 @@ and [Java](https://oxia-db.github.io/docs/clients/java) clients:
 | Automatic retries & shard re-routing | ✅ | ✅ | ✅ |
 | TLS | 🚧 | ✅ | ✅ |
 | Token authentication | 🚧 | ✅ | ✅ |
-| OpenTelemetry metrics | 🚧 | ✅ | ✅ |
+| OpenTelemetry metrics | ✅¹ | ✅ | ✅ |
 
 ✅ supported · 🚧 planned
+
+¹ Behind the off-by-default `otel` Cargo feature.
 
 ## Compatibility
 

@@ -4,6 +4,7 @@ use crate::batcher::{BatcherDeps, ReadBatcher, WriteBatcher, WriteOp, pending_wr
 use crate::client_builder::OxiaClientBuilder;
 use crate::client_options::OxiaClientOptions;
 use crate::errors::OxiaError;
+use crate::metrics::Metrics;
 use crate::notification_manager::NotificationManager;
 use crate::operations::Pending;
 use crate::proto;
@@ -39,6 +40,7 @@ pub(crate) struct Inner {
     pub(crate) shard_manager: Arc<ShardManager>,
     pub(crate) session_manager: Arc<SessionManager>,
     batcher_deps: Arc<BatcherDeps>,
+    metrics: Metrics,
     notification_managers: DashMap<u64, NotificationManager>,
     sequence_managers: DashMap<u64, SequenceUpdatesManager>,
     next_subscription_id: AtomicU64,
@@ -142,7 +144,10 @@ impl OxiaClient {
             .await
     }
 
-    pub(crate) async fn new(options: OxiaClientOptions) -> Result<OxiaClient, OxiaError> {
+    pub(crate) async fn new(
+        options: OxiaClientOptions,
+        metrics: Metrics,
+    ) -> Result<OxiaClient, OxiaError> {
         let provider_manager = Arc::new(ProviderManager::new(options.request_timeout));
         let shard_manager = Arc::new(
             ShardManager::new(ShardManagerOptions {
@@ -178,6 +183,7 @@ impl OxiaClient {
                 shard_manager,
                 session_manager,
                 batcher_deps,
+                metrics,
                 notification_managers: DashMap::new(),
                 sequence_managers: DashMap::new(),
                 next_subscription_id: AtomicU64::new(0),
@@ -577,6 +583,10 @@ impl OxiaClient {
 
     pub(crate) fn request_timeout(&self) -> Duration {
         self.inner.options.request_timeout
+    }
+
+    pub(crate) fn metrics(&self) -> &Metrics {
+        &self.inner.metrics
     }
 
     pub(crate) fn identity(&self) -> &str {

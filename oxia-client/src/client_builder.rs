@@ -48,7 +48,20 @@ pub struct OxiaClientBuilder {
     session_timeout: Option<Duration>,
     session_keep_alive: Option<Duration>,
     request_timeout: Option<Duration>,
+    #[cfg(feature = "otel")]
+    meter: Option<opentelemetry::metrics::Meter>,
 }
+
+// An OpenTelemetry `Meter` wraps an `Arc<dyn InstrumentProvider>` that is not
+// itself unwind-safe, which would otherwise strip these auto traits from the
+// builder whenever `otel` is enabled — a spurious semver break, since the
+// builder is unwind-safe in the default build. Recording metrics across an
+// unwind boundary is safe, so assert them back. Only compiled with `otel`,
+// where the auto-derived impls no longer apply (so there is no conflict).
+#[cfg(feature = "otel")]
+impl std::panic::UnwindSafe for OxiaClientBuilder {}
+#[cfg(feature = "otel")]
+impl std::panic::RefUnwindSafe for OxiaClientBuilder {}
 
 impl OxiaClientBuilder {
     /// Creates a builder with all options at their defaults.
@@ -128,6 +141,16 @@ impl OxiaClientBuilder {
         self
     }
 
+    /// Records client metrics through the given OpenTelemetry meter provider,
+    /// under the meter named `oxia_client`. When unset, the global meter
+    /// provider is used. Requires the `otel` feature.
+    #[cfg(feature = "otel")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "otel")))]
+    pub fn meter_provider(mut self, provider: &impl opentelemetry::metrics::MeterProvider) -> Self {
+        self.meter = Some(crate::metrics::meter_from_provider(provider));
+        self
+    }
+
     fn assemble_options(self) -> OxiaClientOptions {
         let mut options = OxiaClientOptions::default();
         if let Some(service_address) = self.service_address {
@@ -171,19 +194,31 @@ impl OxiaClientBuilder {
     /// unreachable, the namespace does not exist, or the first shard
     /// assignments cannot be obtained.
     pub async fn build(self) -> Result<OxiaClient, OxiaError> {
+        #[cfg(feature = "otel")]
+        let metrics = crate::metrics::Metrics::new(self.meter.clone());
+        #[cfg(not(feature = "otel"))]
+        let metrics = crate::metrics::Metrics;
         let options = self.assemble_options();
         if options.max_write_batches_in_flight == 0 || options.max_read_batches_in_flight == 0 {
             return Err(OxiaError::InvalidArgument(
                 "max batches in flight must be at least 1".to_string(),
             ));
         }
-        OxiaClient::new(options).await
+        OxiaClient::new(options, metrics).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The builder must stay unwind-safe in every feature configuration; the
+    // `otel` meter field must not silently strip these auto traits (see the
+    // manual impls above). Compile-time only.
+    const _: fn() = || {
+        fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        assert_unwind_safe::<OxiaClientBuilder>();
+    };
 
     #[test]
     fn keep_alive_defaults_to_a_tenth_of_the_session_timeout() {
