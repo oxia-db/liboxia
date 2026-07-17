@@ -1,0 +1,22 @@
+# Release automation for oxia-client (see RELEASING.md).
+#
+# Release notes are published as GitHub Releases generated from the commit
+# history; this repository intentionally keeps no in-repo CHANGELOG.md, so the
+# changelog file is never written.
+[workspace]
+changelog_update = false
+git_release_enable = true
+git_tag_enable = true
+# ci.yml already runs cargo-semver-checks against the published baseline; don't
+# duplicate it here (and it needs Docker + a protoc-built baseline).
+semver_check = false
+
+# Only oxia-client is released to crates.io. The FFI shim and the perf tool are
+# internal (`publish = false`); release-plz ignores them.
+[[package]]
+name = "oxia-client-ffi"
+release = false
+
+[[package]]
+name = "oxia-perf"
+release = false
