@@ -46,6 +46,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+# The `signal` feature is for the graceful_shutdown example's Ctrl-C handling.
+tokio = { workspace = true, features = ["signal"] }
 jsonwebtoken = "9"
 serde = { version = "1", features = ["derive"] }
 opentelemetry_sdk = { workspace = true, features = ["metrics", "testing", "rt-tokio"] }
@@ -57,3 +59,7 @@ tokio-test = "0.4"
 [build-dependencies]
 tonic-build = { workspace = true }
 protox = { workspace = true }
+
+[[example]]
+name = "security_tls"
+required-features = ["tls"]
