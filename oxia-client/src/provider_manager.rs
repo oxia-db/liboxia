@@ -1,10 +1,16 @@
+use crate::auth::{AuthInterceptor, TokenAuth};
 use crate::errors::OxiaError;
 use crate::proto::oxia_client_client::OxiaClientClient;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::OnceCell;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint};
+
+/// The transport every RPC flows through: a tonic channel wrapped with the
+/// auth interceptor (a no-op when no token provider is configured).
+pub(crate) type AuthChannel = InterceptedService<Channel, AuthInterceptor>;
 
 /// HTTP/2 keep-alive settings, matching the reference client. The server enforces
 /// a minimum client ping interval of 5s and permits pings without an active
@@ -16,8 +22,9 @@ const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct ProviderManager {
-    providers: Arc<DashMap<String, OnceCell<OxiaClientClient<Channel>>>>,
+    providers: Arc<DashMap<String, OnceCell<OxiaClientClient<AuthChannel>>>>,
     connect_timeout: Duration,
+    auth: Option<TokenAuth>,
     #[cfg(feature = "tls")]
     tls: Option<tonic::transport::ClientTlsConfig>,
 }
@@ -26,9 +33,10 @@ impl ProviderManager {
     pub async fn get_provider(
         &self,
         address: String,
-    ) -> Result<OxiaClientClient<Channel>, OxiaError> {
+    ) -> Result<OxiaClientClient<AuthChannel>, OxiaError> {
         let once_cell = self.providers.entry(address.clone()).or_default();
         let connect_timeout = self.connect_timeout;
+        let auth = self.auth.clone();
         #[cfg(feature = "tls")]
         let tls = self.tls.clone();
         let client = once_cell
@@ -53,7 +61,10 @@ impl ProviderManager {
                     None => endpoint,
                 };
                 let channel = endpoint.connect().await?;
-                Ok::<OxiaClientClient<Channel>, OxiaError>(OxiaClientClient::new(channel))
+                Ok::<OxiaClientClient<AuthChannel>, OxiaError>(OxiaClientClient::with_interceptor(
+                    channel,
+                    AuthInterceptor::new(auth),
+                ))
             })
             .await?
             .clone();
@@ -64,9 +75,17 @@ impl ProviderManager {
         ProviderManager {
             providers: Arc::new(DashMap::new()),
             connect_timeout,
+            auth: None,
             #[cfg(feature = "tls")]
             tls: None,
         }
+    }
+
+    /// Authenticates every connection this manager creates with tokens from
+    /// the given provider.
+    pub fn with_auth(mut self, auth: Option<TokenAuth>) -> ProviderManager {
+        self.auth = auth;
+        self
     }
 
     /// Applies a TLS configuration to every connection this manager creates.

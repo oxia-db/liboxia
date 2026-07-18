@@ -80,7 +80,10 @@
 //! [`request_timeout`](OxiaClientBuilder::request_timeout),
 //! [`session_timeout`](OxiaClientBuilder::session_timeout) /
 //! [`session_keep_alive`](OxiaClientBuilder::session_keep_alive),
-//! [`identity`](OxiaClientBuilder::identity), and the batching limits
+//! [`identity`](OxiaClientBuilder::identity), token authentication
+//! ([`auth_token`](OxiaClientBuilder::auth_token) /
+//! [`auth_token_provider`](OxiaClientBuilder::auth_token_provider)), and the
+//! batching limits
 //! ([`batch_max_size`](OxiaClientBuilder::batch_max_size),
 //! [`max_requests_per_batch`](OxiaClientBuilder::max_requests_per_batch),
 //! [`max_write_batches_in_flight`](OxiaClientBuilder::max_write_batches_in_flight),
@@ -141,8 +144,9 @@
 //!   domain-name override are configured with [`OxiaClientBuilder`]'s `tls`
 //!   method (see `TlsOptions`).
 //!
-//! Token authentication is planned, and will be documented here when it
-//! lands.
+//! Token authentication needs no feature: it is always available through
+//! [`auth_token`](OxiaClientBuilder::auth_token) /
+//! [`auth_token_provider`](OxiaClientBuilder::auth_token_provider).
 
 #![forbid(unsafe_code)]
 // Render "Available on crate feature otel" badges on docs.rs (nightly-only
@@ -156,6 +160,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
 mod address;
+mod auth;
 mod batcher;
 mod client;
 mod client_builder;
@@ -189,6 +194,7 @@ pub(crate) mod proto {
 
 pub use bytes::Bytes;
 
+pub use auth::TokenProvider;
 pub use client::OxiaClient;
 pub use client_builder::OxiaClientBuilder;
 pub use errors::OxiaError;

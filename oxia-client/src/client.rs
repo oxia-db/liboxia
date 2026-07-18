@@ -148,13 +148,12 @@ impl OxiaClient {
         options: OxiaClientOptions,
         metrics: Metrics,
     ) -> Result<OxiaClient, OxiaError> {
-        #[cfg(not(feature = "tls"))]
-        let provider_manager = Arc::new(ProviderManager::new(options.request_timeout));
+        let provider_manager = ProviderManager::new(options.request_timeout);
+        let provider_manager = provider_manager.with_auth(options.auth.clone());
         #[cfg(feature = "tls")]
-        let provider_manager = Arc::new(
-            ProviderManager::new(options.request_timeout)
-                .with_tls(options.tls.as_ref().map(|tls| tls.to_client_tls_config())),
-        );
+        let provider_manager =
+            provider_manager.with_tls(options.tls.as_ref().map(|tls| tls.to_client_tls_config()));
+        let provider_manager = Arc::new(provider_manager);
         let shard_manager = Arc::new(
             ShardManager::new(ShardManagerOptions {
                 address: options.service_address.clone(),
@@ -872,7 +871,9 @@ impl OxiaClient {
     async fn open_streaming_with_retry<Resp, Fut>(
         &self,
         shard: i64,
-        call: impl Fn(proto::oxia_client_client::OxiaClientClient<tonic::transport::Channel>) -> Fut,
+        call: impl Fn(
+            proto::oxia_client_client::OxiaClientClient<crate::provider_manager::AuthChannel>,
+        ) -> Fut,
     ) -> Result<(Option<Resp>, tonic::Streaming<Resp>), OxiaError>
     where
         Fut: Future<Output = Result<tonic::Response<tonic::Streaming<Resp>>, tonic::Status>>,
