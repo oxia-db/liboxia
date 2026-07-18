@@ -169,6 +169,8 @@ mod errors;
 mod hash;
 mod key;
 mod metrics;
+#[cfg(test)]
+mod mock_server;
 mod notification_manager;
 mod operations;
 mod provider_manager;
@@ -186,7 +188,10 @@ mod types;
 #[allow(
     clippy::derive_partial_eq_without_eq,
     clippy::enum_variant_names,
-    missing_docs
+    missing_docs,
+    // The generated server stubs are used only by the cfg(test) mock server,
+    // so they are dead code in non-test builds.
+    dead_code
 )]
 pub(crate) mod proto {
     include!(concat!(env!("OUT_DIR"), "/io.oxia.proto.v1.rs"));

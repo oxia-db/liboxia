@@ -6,7 +6,9 @@ fn main() {
         .expect("failed to compile proto/client.proto with protox");
     tonic_build::configure()
         .build_client(true)
-        .build_server(false)
+        // Server stubs are used only by the in-process mock server that the
+        // hermetic unit tests run against (src/mock_server.rs, cfg(test)).
+        .build_server(true)
         // Generate `bytes::Bytes` for all proto `bytes` fields (record values):
         // decoding borrows the receive buffer and cloning is refcounted, so
         // values move through the client without byte copies.
