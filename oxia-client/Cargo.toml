@@ -35,6 +35,8 @@ opentelemetry = { workspace = true, optional = true }
 [features]
 # OpenTelemetry metrics (meter `oxia_client`); off by default for a zero-cost build.
 otel = ["dep:opentelemetry"]
+# TLS connections (rustls with the ring provider; OS trust roots by default).
+tls = ["tonic/tls-ring", "tonic/tls-native-roots"]
 
 # Build docs.rs with all optional features so the `otel` API is documented,
 # with "Available on crate feature otel" badges (see the `docsrs` cfg in lib.rs).
@@ -45,6 +47,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["metrics", "testing", "rt-tokio"] }
+rcgen = { workspace = true }
 testcontainers = "0.23"
 testcontainers-modules = "0.11"
 tokio-test = "0.4"

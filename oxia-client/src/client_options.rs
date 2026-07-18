@@ -24,6 +24,9 @@ pub struct OxiaClientOptions {
     pub session_keep_alive: Duration,
     /// Timeout for individual requests (default: 30s).
     pub request_timeout: Duration,
+    /// TLS settings; `None` connects in plaintext (default).
+    #[cfg(feature = "tls")]
+    pub tls: Option<crate::tls::TlsOptions>,
 }
 
 impl Default for OxiaClientOptions {
@@ -39,6 +42,8 @@ impl Default for OxiaClientOptions {
             session_timeout: Duration::from_secs(15),
             session_keep_alive: Duration::from_secs(15) / 10,
             request_timeout: Duration::from_secs(30),
+            #[cfg(feature = "tls")]
+            tls: None,
         }
     }
 }

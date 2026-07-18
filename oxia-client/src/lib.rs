@@ -134,9 +134,15 @@
 //!   meter; attach a meter provider with [`OxiaClientBuilder`]'s
 //!   `meter_provider` method, or let the client fall back to the global
 //!   provider. Without it, metrics recording compiles to a zero-cost no-op.
+//! - **`tls`** *(off by default)* — TLS connections via
+//!   [rustls](https://github.com/rustls/rustls). Enabled by an `https://` (or
+//!   `tls://`) service address, which verifies the server against the system
+//!   trust roots; a custom CA, a client certificate (mutual TLS), or a
+//!   domain-name override are configured with [`OxiaClientBuilder`]'s `tls`
+//!   method (see `TlsOptions`).
 //!
-//! TLS and token authentication are planned, and will be documented here when
-//! they land.
+//! Token authentication is planned, and will be documented here when it
+//! lands.
 
 #![forbid(unsafe_code)]
 // Render "Available on crate feature otel" badges on docs.rs (nightly-only
@@ -168,6 +174,8 @@ mod server_error;
 mod session_manager;
 mod shard_manager;
 mod streams;
+#[cfg(feature = "tls")]
+mod tls;
 mod types;
 
 #[allow(
@@ -189,4 +197,7 @@ pub use requests::{
     RangeScanBuilder, SequenceUpdatesBuilder,
 };
 pub use streams::{ListStream, Notifications, RangeScanStream, SequenceUpdates};
+#[cfg(feature = "tls")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
+pub use tls::TlsOptions;
 pub use types::{ComparisonType, GetResult, Notification, PutResult, Version};
