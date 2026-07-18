@@ -76,10 +76,10 @@ and [Java](https://oxia-db.github.io/docs/clients/java) clients:
 | Adaptive request batching | ✅ | ✅ | ✅ |
 | Automatic retries & shard re-routing | ✅ | ✅ | ✅ |
 | TLS | ✅¹ | ✅ | ✅ |
-| Token authentication | 🚧 | ✅ | ✅ |
+| Token authentication | ✅ | ✅ | ✅ |
 | OpenTelemetry metrics | ✅¹ | ✅ | ✅ |
 
-✅ supported · 🚧 planned
+✅ supported
 
 ¹ Behind an off-by-default Cargo feature (`tls` and `otel`, respectively).
 

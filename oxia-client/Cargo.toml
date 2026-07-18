@@ -46,6 +46,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+jsonwebtoken = "9"
+serde = { version = "1", features = ["derive"] }
 opentelemetry_sdk = { workspace = true, features = ["metrics", "testing", "rt-tokio"] }
 rcgen = { workspace = true }
 testcontainers = "0.23"

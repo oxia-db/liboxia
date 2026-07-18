@@ -48,21 +48,21 @@ pub struct OxiaClientBuilder {
     session_timeout: Option<Duration>,
     session_keep_alive: Option<Duration>,
     request_timeout: Option<Duration>,
+    auth: Option<crate::auth::TokenAuth>,
     #[cfg(feature = "otel")]
     meter: Option<opentelemetry::metrics::Meter>,
     #[cfg(feature = "tls")]
     tls: Option<crate::tls::TlsOptions>,
 }
 
-// An OpenTelemetry `Meter` wraps an `Arc<dyn InstrumentProvider>` that is not
-// itself unwind-safe, which would otherwise strip these auto traits from the
-// builder whenever `otel` is enabled — a spurious semver break, since the
-// builder is unwind-safe in the default build. Recording metrics across an
-// unwind boundary is safe, so assert them back. Only compiled with `otel`,
-// where the auto-derived impls no longer apply (so there is no conflict).
-#[cfg(feature = "otel")]
+// The `auth` token provider (an `Arc<dyn TokenProvider>`) and the `otel`
+// meter (an `Arc<dyn InstrumentProvider>`) are not structurally unwind-safe,
+// which would strip these auto traits from the builder — a spurious semver
+// break, since neither reading a token nor recording a metric across an
+// unwind boundary is unsound. Assert them back; the compile-time check in the
+// tests module proves the builder stays unwind-safe in every feature
+// configuration.
 impl std::panic::UnwindSafe for OxiaClientBuilder {}
-#[cfg(feature = "otel")]
 impl std::panic::RefUnwindSafe for OxiaClientBuilder {}
 
 impl OxiaClientBuilder {
@@ -143,6 +143,23 @@ impl OxiaClientBuilder {
         self
     }
 
+    /// Authenticates every request with the given static bearer token
+    /// (`authorization: Bearer <token>`). For tokens that rotate, use
+    /// [`auth_token_provider`](Self::auth_token_provider).
+    pub fn auth_token(self, token: impl Into<String>) -> Self {
+        let token = token.into();
+        self.auth_token_provider(move || token.clone())
+    }
+
+    /// Authenticates every request with bearer tokens from the given
+    /// [`TokenProvider`](crate::TokenProvider), called once per request so
+    /// rotated credentials are picked up transparently. Any
+    /// `Fn() -> String + Send + Sync` closure works.
+    pub fn auth_token_provider(mut self, provider: impl crate::TokenProvider + 'static) -> Self {
+        self.auth = Some(crate::auth::TokenAuth(std::sync::Arc::new(provider)));
+        self
+    }
+
     /// Records client metrics through the given OpenTelemetry meter provider,
     /// under the meter named `oxia_client`. When unset, the global meter
     /// provider is used. Requires the `otel` feature.
@@ -199,6 +216,7 @@ impl OxiaClientBuilder {
         if let Some(request_timeout) = self.request_timeout {
             options.request_timeout = request_timeout;
         }
+        options.auth = self.auth;
         // An https:// (or tls://, normalized to https:// on entry) service
         // address implies TLS with default options, matching the Go client's
         // `tls://` handling.
