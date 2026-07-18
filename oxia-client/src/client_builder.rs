@@ -50,6 +50,8 @@ pub struct OxiaClientBuilder {
     request_timeout: Option<Duration>,
     #[cfg(feature = "otel")]
     meter: Option<opentelemetry::metrics::Meter>,
+    #[cfg(feature = "tls")]
+    tls: Option<crate::tls::TlsOptions>,
 }
 
 // An OpenTelemetry `Meter` wraps an `Arc<dyn InstrumentProvider>` that is not
@@ -151,6 +153,18 @@ impl OxiaClientBuilder {
         self
     }
 
+    /// Connects with TLS, using the given [`TlsOptions`](crate::TlsOptions).
+    /// Requires the `tls` feature.
+    ///
+    /// TLS is also enabled — with default options, verifying against the
+    /// system trust roots — by an `https://` (or `tls://`) service address.
+    #[cfg(feature = "tls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
+    pub fn tls(mut self, tls: crate::tls::TlsOptions) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
     fn assemble_options(self) -> OxiaClientOptions {
         let mut options = OxiaClientOptions::default();
         if let Some(service_address) = self.service_address {
@@ -185,6 +199,18 @@ impl OxiaClientBuilder {
         if let Some(request_timeout) = self.request_timeout {
             options.request_timeout = request_timeout;
         }
+        // An https:// (or tls://, normalized to https:// on entry) service
+        // address implies TLS with default options, matching the Go client's
+        // `tls://` handling.
+        #[cfg(feature = "tls")]
+        {
+            options.tls = self.tls.or_else(|| {
+                options
+                    .service_address
+                    .starts_with("https://")
+                    .then(crate::tls::TlsOptions::new)
+            });
+        }
         options
     }
 
@@ -202,6 +228,14 @@ impl OxiaClientBuilder {
         if options.max_write_batches_in_flight == 0 || options.max_read_batches_in_flight == 0 {
             return Err(OxiaError::InvalidArgument(
                 "max batches in flight must be at least 1".to_string(),
+            ));
+        }
+        // Without the `tls` feature an https:// dial would only fail deep in
+        // the transport; reject it up front with an actionable message.
+        #[cfg(not(feature = "tls"))]
+        if options.service_address.starts_with("https://") {
+            return Err(OxiaError::InvalidArgument(
+                "TLS service address requires the `tls` Cargo feature".to_string(),
             ));
         }
         OxiaClient::new(options, metrics).await

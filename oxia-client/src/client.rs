@@ -148,7 +148,13 @@ impl OxiaClient {
         options: OxiaClientOptions,
         metrics: Metrics,
     ) -> Result<OxiaClient, OxiaError> {
+        #[cfg(not(feature = "tls"))]
         let provider_manager = Arc::new(ProviderManager::new(options.request_timeout));
+        #[cfg(feature = "tls")]
+        let provider_manager = Arc::new(
+            ProviderManager::new(options.request_timeout)
+                .with_tls(options.tls.as_ref().map(|tls| tls.to_client_tls_config())),
+        );
         let shard_manager = Arc::new(
             ShardManager::new(ShardManagerOptions {
                 address: options.service_address.clone(),

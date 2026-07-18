@@ -34,8 +34,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Clippy (otel feature)
-        run: cargo clippy -p oxia-client --all-targets --features otel -- -D warnings
+      - name: Clippy (all features)
+        run: cargo clippy -p oxia-client --all-targets --all-features -- -D warnings
 
       - name: Build
         run: cargo build --workspace
@@ -50,11 +50,14 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
-      # The default `cargo test` runs with the `otel` feature off, so the
-      # metrics path is never exercised above. Run just the metrics integration
-      # test with the feature on (the image is already pulled).
+      # The default `cargo test` runs with the optional features off, so their
+      # paths are never exercised above. Run the feature-gated tests explicitly
+      # (the image is already pulled).
       - name: Run metrics test (otel feature)
         run: cargo test -p oxia-client --features otel --test integration_tests test_metrics_recorded_through_meter_provider
+
+      - name: Run TLS tests (tls feature)
+        run: cargo test -p oxia-client --features tls --test tls_tests
 
   semver:
     name: Semver checks
